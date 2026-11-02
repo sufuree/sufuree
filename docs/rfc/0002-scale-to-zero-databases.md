@@ -1,6 +1,6 @@
 # RFC-0002: Sufuree — scale-to-zero databases
 
-**Status:** Proposed for owner acceptance — bounded version-one database design. This is the canonical database extension to [RFC-0001](0001-scale-to-zero-unikernel-runtime.md). Acceptance approves the scope and proposed mechanisms, not implementation, durability proof or achieved cost savings.
+**Status:** Accepted design on merge of PR #1 through the owner-authorized independent review and merge workflow; bounded version-one database scope. This is the canonical database extension to [RFC-0001](0001-scale-to-zero-unikernel-runtime.md). Acceptance approves the scope and proposed mechanisms, not implementation, durability proof or achieved cost savings.
 
 **Updated:** November 1, 2026. **Control language:** Go. **Initial database candidate:** SurrealDB. **Packaging:** One Sufuree repository with application and database command groups and shared in-repository packages. Command names remain proposed (`sufuree app`, `sufuree db`); commands do not determine the number of runtime services.
 
@@ -8,7 +8,7 @@ Sufuree starts isolated database instances on demand and safely stops their comp
 
 ## 1. Requirements and scope
 
-- Treat a database instance as an opaque managed identity with persistent storage, resource limits, credentials, readiness and wake/sleep policies. Sufuree does not define customers, apps or Zati's configuration model; callers map their concepts to instance identities.
+- Treat a database instance as an opaque managed identity with persistent storage, resource limits, credentials, readiness and wake/sleep policies. Sufuree does not define customers, apps or the calling product's configuration model; callers map their concepts to instance identities.
 - Use one repository, shared packages and one authoritative host-capacity planner. Database lifecycle rules extend the common runtime; they do not create a competing scheduler.
 - Default backend pools to `minHosts=0`. Prefer suitable existing capacity, start a host only when needed, retain it for a configurable quiet period after activity, then remove it after safe drain. Optional warm capacity trades extra cost for lower startup latency.
 - Target several seconds for ordinary activation on a ready host with capacity and required data available. Starting a host is an explicit slower exception, potentially minutes, subject to measurement and deadlines.
@@ -36,7 +36,7 @@ Use one Sufuree repository. Application and database command groups submit desir
 
 Database-specific code adds engine readiness, storage identity/fencing, safe engine shutdown, backup and restore contracts. Generic lifecycle code must not embed SurrealDB query semantics. Shared code does not mean shared credentials or unrestricted mutation authority.
 
-Spark is a reuse source, not an importable collection of `internal/` packages. First resolve RFC-0001 F03's durable-transition gap and agree a supported extraction/API boundary with Spark. If both repositories later consume a common library, choose its public module/versioning separately; this RFC does not require a new package repository or silently copy a second independently maintained scheduler.
+the source orchestrator is a reuse source, not an importable collection of `internal/` packages. First resolve RFC-0001 F03's durable-transition gap and agree a supported extraction/API boundary with the source orchestrator. If both repositories later consume a common library, choose its public module/versioning separately; this RFC does not require a new package repository or silently copy a second independently maintained scheduler.
 
 ## 3. Ownership and runtime components
 
@@ -47,9 +47,9 @@ Spark is a reuse source, not an importable collection of `internal/` packages. F
 | Controller | Persist desired state and operations, assign placement, reconcile outcomes and manage one capacity ledger. Database lifecycle handlers enforce stateful requirements. |
 | Host agent | Execute generation-bound assignments, manage private guest networking and storage, report readiness and perform safe shutdown. |
 | Application/database guests | Run workload code or the pinned database engine within qualified isolation/resource boundaries. |
-| ASSI / owning IaC | Custody of provider host, network, volume and snapshot effects through a scoped, budgeted contract. No unrestricted provider credentials on the public gateway. |
-| Zati / AMOS / callers | Own customer/application mapping, identity and domain behavior; consume supported Sufuree interfaces without transferring credential or data custody. |
-| Bora | Observe operational evidence and recovery outcomes; observation does not grant mutation authority. |
+| infrastructure custody / owning IaC | Custody of provider host, network, volume and snapshot effects through a scoped, budgeted contract. No unrestricted provider credentials on the public gateway. |
+| Product callers | Own customer/application mapping, identity and domain behavior; consume supported Sufuree interfaces without transferring credential or data custody. |
+| external observability | Observe operational evidence and recovery outcomes; observation does not grant mutation authority. |
 
 Logical roles may share processes or machines where qualified. Start with a small reachable gateway/controller and private host agents/guests. Database guests may share suitable hosts with application guests while retaining independent VM/storage boundaries, reservations and protection from preemption. Separate host pools are optional isolation/resource policy, not a mandatory second paid baseline. All pools remain under one capacity authority.
 
@@ -83,14 +83,11 @@ SurrealDB is a strong candidate because it ships as a single binary and provides
 
 ### 5.1 Guest OS: Linux microVM vs. Unikernel qualification
 
-While `RFC-0001` prefers unikernels for stateless Go services, SurrealDB is a complex multi-threaded Rust database engine (`tokio` async runtime, memory-mapped I/O, background compaction threads, `fsync` barriers and POSIX file locking).
+The intended database guest is a qualified unikernel; a Linux guest is the reference and compatibility fallback. Go/Rust packaging alone does not establish memory-mapping, thread, locking or flush correctness.
 
-* **Required qualification rule:** Do not assume SurrealDB runs safely inside Nanos or Unikraft. See [RFC-0001 runtime compatibility](0001-scale-to-zero-unikernel-runtime.md#runtime-compatibility) that Zati's earlier Nanos assessment rejected Nanos for its controller specifically due to subprocess, locking, permissions and SQLite assumptions.
-* **Qualification path:**
-1. **Baseline (Required first):** Qualify SurrealDB inside a minimal, stripped **Linux microVM guest** (Firecracker or QEMU microVM with a minimal read-only rootfs and dedicated `ext4`/`xfs` data volume). Linux provides battle-tested `fsync`, `mmap`, `epoll`, `flock` and OOM behavior for Rust storage engines.
-2. **Unikernel experiment (Optional optimization):** Only adopt a Nanos/Unikraft guest for SurrealDB if it passes identical crash-recovery, `mmap`/`fsync` durability, thread-scheduling and compaction torture tests against the Linux microVM baseline.
-
-
+1. First establish a minimal Linux/QEMU/KVM reference with an explicitly registered data filesystem and the pinned engine. This is the baseline for comparing storage and recovery behavior, not a decision to replace the intended unikernel tier.
+2. Qualify the intended Nanos/QEMU/KVM guest under the same crash/recovery/durability criteria, using its own explicitly manifested filesystem format. Do not call the production guest qualified until that path passes. Linux fallback is reported explicitly if a concrete incompatibility is found; data-format changes require controlled export/restore.
+3. Firecracker/Unikraft and other combinations are separate later profiles, not implicit options for the initial raw-volume path.
 
 ### 5.2 Storage backend qualification
 
@@ -160,19 +157,19 @@ A database guest must never be stopped by an ungraceful VMM kill during normal s
 1. **Close Gateway Admission (`AcquireRequest` $\to$ `STOPPING`):** New incoming requests block in the gateway's bounded activation queue for the *next* generation rather than entering the draining guest.
 2. **Drain In-Flight Operations:** Wait for all active HTTP requests and open WebSocket/TCP streams to reach zero within a bounded drain timeout.
 3. **Graceful Engine Shutdown (`SIGTERM`):** Send `SIGTERM` to the SurrealDB process inside the guest. Use the pinned engine adapter to verify its documented shutdown behavior and clean exit. Signal delivery or exit code alone is not proof that acknowledged writes are durable; qualify the complete engine/filesystem/volume path.
-4. **Filesystem Sync & Unmount:** Inside the guest (or via clean guest ACPI shutdown), execute `sync` and cleanly unmount the persistent data volume so the filesystem journal (`ext4`/`xfs`) is marked clean.
+4. **Filesystem Sync & Unmount:** Inside the guest (or via clean guest ACPI shutdown), execute `sync` and cleanly unmount the persistent data volume using the manifested filesystem and qualified guest shutdown mechanism; do not assume a unikernel exposes Linux mount or signal tools.
 5. **Confirm VMM Exit:** Only after VMM exit and clean unmount may the host reconciler report the guest `DORMANT` and release the volume for detachment or host scale-in.
 
-If drain times out at step 2, retain active leases and reservations and report the blocked drain; do not force-close a transaction to meet the idle timer. If steps 3–5 time out or fail, mark the database generation `UNCERTAIN / FAULTED`, retain the host and volume reservation, alert observability, and refuse automatic forced volume detachment until reconciled. New demand cannot revive or replace a partially stopped generation without reconciliation.
+If a planned drain times out at step 2 and engine shutdown has not begun, it may be cancelled by an authorized reconciliation: atomically reopen admission for the same healthy generation with its leases/reservations intact. Once shutdown or a failure fence begins, admission stays closed until recovery. Otherwise retain active leases and reservations and report the blocked drain; do not force-close a transaction to meet the idle timer. If steps 3–5 time out or fail, mark the database generation `UNCERTAIN / FAULTED`, retain the host and volume reservation, alert observability, and refuse automatic forced volume detachment until reconciled. New demand cannot revive or replace a partially stopped generation without reconciliation.
 
 ---
 
 ## 7. Storage custody, durability and recovery
 
-Apply the persistent identity and verified-recovery requirements in RFC-0001 Section 8:
+Apply the persistent identity and verified-recovery requirements in RFC-0001 Section 7:
 
 1. **No Anonymous Volumes:** The database coordinator rejects any workload specification that lacks an explicit, registered `volume_id`, filesystem UUID/header verification, and retention policy. Stopping a guest or terminating a host must never trigger automatic deletion of a database volume.
-2. **Write Durability Contract ($RPO = 0$ for committed writes on surviving volume):** A successfully committed transaction acknowledged under the pinned engine/client durability contract must survive on the persistent volume, not solely in guest RAM. HTTP `200 OK` alone is not a commit receipt: validate statement/transaction results and error bodies, including [protocol-level errors](https://surrealdb.com/docs/reference/rest-api/errors). Memory snapshots are not used as the database durability mechanism (`RFC-0001` F10).
+2. **Write Durability Contract ($RPO = 0$ for committed writes on surviving volume):** A successfully committed transaction acknowledged under the pinned engine/client durability contract must survive on the persistent volume, not solely in guest RAM. HTTP `200 OK` alone is not a commit receipt: validate statement/transaction results and error bodies, including [protocol-level errors](https://surrealdb.com/docs/reference/rest-api/errors). Memory snapshots are not used as the database durability mechanism (`RFC-0001` F10). Admission requires an explicit engine sync/durability mode in the versioned manifest that guarantees acknowledged commits reach the durable path; asynchronous or unverified default modes are rejected. Determine the exact flag/API for the pinned engine release and test it rather than assuming its defaults satisfy this contract.
 3. **Automated Backup & Non-Empty Verification:**
 * Before planned relocation or maintenance, and on a defined schedule following write activity, obtain a verified recovery point using a qualified logical export and/or block-level snapshot procedure. Label whether a snapshot is application-consistent or crash-consistent, and record the engine/image/configuration version needed to recover it. After unexpected host failure, recovery uses the surviving volume or the last verified backup; do not pretend a new export from an unreachable host is available.
 * **Anti-Empty-Backup Gate:** Every backup job must record row/table counts or cryptographic digest metadata and periodically test restoration into an isolated scratch guest. A backup that restores an empty database when prior state was non-empty is treated as a critical failure.
@@ -189,7 +186,7 @@ Surviving-volume recovery and volume/AZ loss are different guarantees. Record a 
 
 Initial personal/development policy: target zero loss of acknowledged committed writes when the durable volume survives; target a recovery point no older than one hour for loss of that volume, using hourly snapshots for volumes with a writer since their previous recovery point. Retain 24 hourly and seven daily recovery points. Capture a pre-upgrade recovery point separately. These are configurable policy defaults and qualification targets, not guarantees already achieved. A failed/late backup reports degraded protection and the actual oldest-loss window; it does not continue advertising the one-hour target as satisfied.
 
-Snapshots taken while the engine is active are explicitly crash-consistent unless the engine adapter proves application consistency. The pinned engine's recovery and flush behavior must make that path safe before it is enabled. A dormant volume can be snapshotted without starting its database or a backend host. For long-dormant data with no new writer, retain its last validated state instead of creating identical hourly copies. Keep backup scheduling and credentials available in the always-on control tier, include snapshot/API/retention costs, and cap work during wake storms.
+Snapshots taken while the engine is active are explicitly crash-consistent unless the engine adapter proves application consistency. The pinned engine's recovery and flush behavior must make that path safe before it is enabled. A dormant volume can be snapshotted without starting its database or a backend host. For long-dormant data with no new writer, retain its last validated state instead of creating identical hourly copies. Keep backup scheduling authority and scoped worker invocation available in the always-on control tier; provider credentials remain in the worker and backup transfers use restricted presigned object URLs. Include snapshot/API/retention costs and cap work during wake storms.
 
 Propose a 15-minute recovery-time target for the bounded initial dataset fixture; publish measured dataset size and actual restore duration before offering that objective to callers. Restore the first recovery point and periodic policy-selected samples into an isolated guest, checking schema, records and integrity against the recorded point. Backups stay regionally recoverable with the required keys/permissions outside the failed instance/AZ. Cross-region/account-loss protection and point-in-time recovery are separate opt-in capabilities, not implied here.
 
@@ -209,7 +206,7 @@ The shared Sufuree planner accounts for database and application capacity togeth
 
 * **Placement Affinity by Volume Location:** A database guest must be scheduled into the same Availability Zone as its backing EBS block volume (unless restoring from a cross-AZ snapshot under an explicit recovery procedure).
 * **Attachment Limits:** Account for cloud provider block-volume attachment limits per instance type (e.g., AWS Nitro EBS attachment limits) as a hard scheduling dimension alongside CPU and RAM.
-* **No Preemption:** Database guests are strictly non-interruptible (`RFC-0001` Section 8). A new workload cannot preempt a running database guest.
+* **No Scheduling Preemption:** New workload demand cannot preempt a database guest (RFC-0001 Section 5). Explicit failure fencing follows the full affected-host protocol in Section 3 and can crash all co-hosted guests; choose dedicated placement when that recovery blast radius is unacceptable.
 * **Cold Start Reality (`minHosts=0`):** When the database host pool is at zero, the first database query incurs:
 
 $$\text{Host Provisioning} + \text{EBS Volume Attach} + \text{Guest Boot} + \text{SurrealDB Engine Readiness}$$
@@ -217,7 +214,7 @@ $$\text{Host Provisioning} + \text{EBS Volume Attach} + \text{Guest Boot} + \tex
 
 
 Follow the canonical [activation latency contract](0001-scale-to-zero-unikernel-runtime.md#cold-start-from-zero): target several seconds on a ready host with capacity and storage available; host startup is an explicit slower exception, potentially minutes. No EC2/EBS startup range has been measured for this design. Database readiness includes storage mount and engine recovery, not just guest boot. Measure host provisioning, attachment, boot, engine readiness and first successful query separately. Caller deadlines remain bounded even if the admitted provisioning operation has a longer deadline; never replay a query that may already have executed. Restore from backup is a separate recovery path, not ordinary wake-up.
-* **Approved default:** Use suitable running capacity first; start hosts only when admitted demand cannot fit. Default pools to zero minimum hosts. After activity, retain hosts for a configurable quiet period to avoid repeated cold starts, then stop/terminate only after every guest has safely drained and storage is reconciled.
+* **Owner-directed default:** Use suitable running capacity first; start hosts only when admitted demand cannot fit. Default pools to zero minimum hosts. After activity, retain hosts for a configurable quiet period to avoid repeated cold starts, then terminate only after every guest has safely drained and storage is reconciled.
 * **Optional warm capacity:** A deployment may pay to retain spare ready capacity for faster activation. Make its cost visible. A warm host without free resources, required artifacts or access to the data cannot satisfy the ordinary activation target.
 * **Windows and reservations:** Guest idle windows and host quiet periods are separate controls. Storage cleanup, active streams, recovery and uncertain operations keep reservations until resolved. Tune windows from observed startup cost and traffic; do not impose an unmeasured universal timer.
 * **Large idle fleets:** Before claiming large-scale support, measure controller metadata/index size, dormant volume and snapshot cost, provider volume/attachment quotas, backup scheduling and wake storms. Detach dormant volumes where safe so attachment slots are not reserved indefinitely. One durable volume per instance is the initial proposal, not proof of economical operation at 100,000 instances.
@@ -241,7 +238,7 @@ In addition to the shared in-repository telemetry (`RFC-0001` Section 9), the da
 
 | ID | Gate | Version-one design disposition | Evidence still required |
 | --- | --- | --- | --- |
-| **DB-01** | Shared lifecycle | One shared runtime and executor; fix RFC-0001 F03 before Spark reuse. | Durable-before-effects and error propagation tests. |
+| **DB-01** | Shared lifecycle | One shared runtime and executor; satisfy RFC-0001 F03 before reuse. | Durable-before-effects and error propagation tests. |
 | **DB-02** | Write fencing | Exact-host termination for unreachable AWS writers, observed completion, attachment reconciliation; no Multi-Attach or routine force-detach. | Partition/stale-writer/provider-timeout tests with no conflicting writer. |
 | **DB-03** | Engine/runtime | SurrealKV first qualification candidate, Linux reference and intended unikernel comparison under the same pinned-data contract. | Crash, repeated wake/stop, fsync/locking, memory and compaction tests. |
 | **DB-04** | Persistent sessions | Open streams and declared engine work pin the guest; clients close idle sessions to permit sleep. | Connection/transaction lifetime and visible blocked-drain tests. |
@@ -257,11 +254,12 @@ None of these behaviors is claimed today; each must be demonstrated with recorde
 
 | Scenario | Required observation |
 | --- | --- |
-| **Cold wake from zero hosts** | Request arrives with `0` DB hosts $\to$ single host provisioned $\to$ explicit volume attached with incremented fencing epoch $\to$ guest boots and SurrealDB passes readiness $\to$ query succeeds within bounded deadline. |
+| **Cold wake from zero hosts** | Request arrives with `0` DB hosts $\to$ single host provisioned $\to$ explicit volume attached with incremented fencing epoch $\to$ guest boots and SurrealDB passes readiness $\to$ query succeeds within a caller-opted-in cold-start deadline, or the default short wait returns a not-yet-forwarded retryable result followed by success on a safe later attempt. |
 | **Concurrent wake demand** | 20 concurrent queries arrive while DB is dormant $\to$ exactly one volume attach and guest start occurs $\to$ all 20 queries complete without lock errors. |
-| **Transaction durability across idle stop** | Client commits write (`INSERT`/`RELATE`), receives a verified successful transaction-commit result $\to$ guest drains cleanly (`SIGTERM` + `sync` + `umount`) and host scales to zero $\to$ subsequent wake returns exact committed rows. |
+| **Transaction durability across idle stop** | Client commits write (`INSERT`/`RELATE`), receives a verified successful transaction-commit result $\to$ guest drains cleanly (the qualified engine flush and guest shutdown sequence) and host scales to zero $\to$ subsequent wake returns exact committed rows. |
 | **Simulated host crash mid-write** | Kill host/VMM abruptly during load $\to$ coordinator fences old host and detaches volume $\to$ new guest mounts volume, replays WAL without corruption, and preserves all previously acknowledged writes. |
-| **Stale host partition (Split-brain test)** | Partition Host A while DB guest is running $\to$ verify Coordinator refuses to mount the volume on Host B until the old writer is demonstrably fenced and the volume has passed the required recovery checks; timeout or a force-detach response alone cannot authorize activation. |
+| **Stale host partition (Split-brain test)** | Partition Host A while DB guest is running $\to$ verify controller refuses to mount the volume on Host B until the old writer is demonstrably fenced and the volume has passed the required recovery checks; timeout or a force-detach response alone cannot authorize activation. |
+| **Cancelled planned drain** | Before engine shutdown starts, admission can reopen for the same healthy generation with all leases intact; after shutdown starts, demand waits for recovery instead. |
 | **Pinned WebSocket visibility** | Client holds an idle WebSocket open $\to$ DB remains running safely (no forced mid-session kill) and observability clearly reports the open socket blocking idle stop. |
 | **Anonymous or missing volume rejection** | Attempt to register or boot a DB workload without a pre-existing verified `volume_id` $\to$ admission fails without silently substituting an empty or ephemeral volume. |
 | **Failure-boundary isolation test** | Overload or restart the `RFC-0001` application ingress/controller while the DB service is draining $\to$ new admission fails safely; a host may complete an already-committed local drain, while shared ownership and detachment remain reserved until the controller reconciles. No claim of independent failure immunity is made for co-located roles. |
@@ -278,6 +276,6 @@ None of these behaviors is claimed today; each must be demonstrated with recorde
 
 Owner direction includes one repository/shared runtime, a SurrealDB-focused database capability, independently managed database identities, zero idle backend compute and optional warm capacity. The concrete first-version storage, fencing, networking, recovery and optional operation-ID adapter contracts are now specified for acceptance. Engine/runtime/library versions and measured thresholds are pinned during qualification, not treated as already working.
 
-**Final RFC disposition: proposed for owner acceptance together with RFC-0001.** The material tradeoffs are proxy-capable initial egress, blocked takeover while a writer cannot be fenced, retained storage/backup cost and the explicit nonzero recovery-point window after losing a volume. Acceptance does not authorize migration, provisioning or destructive effects. Native database forwarding retains unknown-write outcomes; the stronger operation-ID adapter guarantee applies only to its supported, qualified operations.
+**Final RFC disposition: accepted upon successful independent review and merge of [PR #1](https://github.com/sufuree/sufuree/pull/1), including RFC-0001.** The owner authorized this headless Claude Code review-and-merge workflow on November 1, 2026. Acceptance concerns design scope only; it does not claim runtime qualification or authorize provisioning, spending, migration or deployment. Native forwarding retains unknown-write outcomes; stronger operation-ID semantics apply only to qualified supported operations.
 
-This document promotes and revises the owner's `tmp/0002-slug.md` proposal. It replaces that working draft; RFC-0001 remains canonical for common runtime, networking, load balancing, ownership and host scaling. The database extension does not duplicate those policies. No implementation or private operational receipt is implied by this public design.
+This document promotes and revises the owner's working database proposal. It replaces that working draft; RFC-0001 remains canonical for common runtime, networking, load balancing, ownership and host scaling. The database extension does not duplicate those policies. No implementation or private operational receipt is implied by this public design.
