@@ -102,7 +102,7 @@ Sufuree supports both native Go unikernels and non-Go vibe coders without changi
 
 | Feature | Mode A: Native Go Unikernel (Phase 1 — Internal) | Mode B: Polyglot BaaS Unikernel (Phase 2 — Vibe Coders) |
 | --- | --- | --- |
-| **Target User** | Sire Run internal services (`Example product`, `Observability`, custom Go agents) | Vibe coders (TypeScript/JS, Python, SQL/JSON) & external AI agents |
+| **Target User** | Example deployment internal services (`Example product`, `Observability`, custom Go agents) | Vibe coders (TypeScript/JS, Python, SQL/JSON) & external AI agents |
 | **Artifact Type** | Custom-compiled Go binary wrapped in Nanos/Unikraft image | Pre-compiled **Sufuree Golden Unikernel** (written in Go, immutable image) |
 | **Compile Time** | ~2 seconds (via pre-warmed `GOCACHE` + raw image injector) | **0 seconds** (instant provisioning; no compiler in the loop) |
 | **Data & Auth** | Custom per Go app (or embedded SQLite + WorkOS SDK) | Built-in SQLite (WAL), Auto-OpenAPI/MCP CRUD, WorkOS Auth, S3 Storage |
@@ -287,7 +287,7 @@ type Provider interface {
 
 ## 6. Dual-Surface Control Plane: OpenAPI 3.1 & MCP
 
-Both human SDKs (or the Flutter executive management UI) and autonomous AI coding agents interact with Sufuree via the exact same schema definitions on `api.sufuree.run` / `mcp.sufuree.run`, secured by WorkOS Bearer Tokens.
+Both human SDKs (or the Flutter executive management UI) and autonomous AI coding agents interact with Sufuree via the exact same schema definitions on `api.example.com` / `mcp.example.com`, secured by WorkOS Bearer Tokens.
 
 ### Core MCP Tools Exposed by Sufuree
 
