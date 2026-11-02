@@ -417,7 +417,7 @@ Record ordinary low traffic, concurrent arrivals to a sleeping backend, TLS hand
 
 A size recommendation must include the observation window, peak/headroom evidence, current and proposed shapes, expected cost and reason. No automatic resize or new spending is authorized by an alert. Before a resize, verify the selected guest image can boot on the destination and that routing, stable addressing, durable state and recovery survive replacement/restart.
 
-The [current workload measurements](../research/aws-cost-2026-10-31/usage/assessment.md) show low mean CPU for several application hosts and modest ECS memory usage. EC2 memory remains missing from the checked paths, and transient CPU spikes are present. These support a small-host experiment without proving that all workloads fit. The nano ingress, controller, TLS, queueing and telemetry footprint has not been measured.
+Size from measured peak and concurrent-start requirements rather than mean CPU or historical allocations. The nano ingress, controller, TLS, queueing and telemetry footprint has not been measured; a small-host experiment is not proof that all workloads fit.
 
 ## 10. Review findings and qualification gates
 
