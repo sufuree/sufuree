@@ -36,7 +36,7 @@ Use one Sufuree repository. Application and database command groups submit desir
 
 Database-specific code adds engine readiness, storage identity/fencing, safe engine shutdown, backup and restore contracts. Generic lifecycle code must not embed SurrealDB query semantics. Shared code does not mean shared credentials or unrestricted mutation authority.
 
-the source orchestrator is a reuse source, not an importable collection of `internal/` packages. First resolve RFC-0001 F03's durable-transition gap and agree a supported extraction/API boundary with the source orchestrator. If both repositories later consume a common library, choose its public module/versioning separately; this RFC does not require a new package repository or silently copy a second independently maintained scheduler.
+The source orchestrator is a reuse source, not an importable collection of `internal/` packages. First resolve RFC-0001 F03's durable-transition gap and agree a supported extraction/API boundary with the source orchestrator. If both repositories later consume a common library, choose its public module/versioning separately; this RFC does not require a new package repository or silently copy a second independently maintained scheduler.
 
 ## 3. Ownership and runtime components
 
@@ -156,9 +156,9 @@ A database guest must never be stopped by an ungraceful VMM kill during normal s
 
 1. **Close Gateway Admission (`AcquireRequest` $\to$ `STOPPING`):** New incoming requests block in the gateway's bounded activation queue for the *next* generation rather than entering the draining guest.
 2. **Drain In-Flight Operations:** Wait for all active HTTP requests and open WebSocket/TCP streams to reach zero within a bounded drain timeout.
-3. **Graceful Engine Shutdown (`SIGTERM`):** Send `SIGTERM` to the SurrealDB process inside the guest. Use the pinned engine adapter to verify its documented shutdown behavior and clean exit. Signal delivery or exit code alone is not proof that acknowledged writes are durable; qualify the complete engine/filesystem/volume path.
-4. **Filesystem Sync & Unmount:** Inside the guest (or via clean guest ACPI shutdown), execute `sync` and cleanly unmount the persistent data volume using the manifested filesystem and qualified guest shutdown mechanism; do not assume a unikernel exposes Linux mount or signal tools.
-5. **Confirm VMM Exit:** Only after VMM exit and clean unmount may the host reconciler report the guest `DORMANT` and release the volume for detachment or host scale-in.
+3. **Graceful Engine Shutdown:** Invoke the pinned engine adapter's qualified flush/close operation and verify clean exit. The Linux reference may use `SIGTERM`; a unikernel must supply a supported control/shutdown channel with equivalent tested semantics. Signal delivery or exit code alone is not proof that acknowledged writes are durable; qualify the complete engine/filesystem/volume path.
+4. **Filesystem Flush & Clean Shutdown:** Invoke the manifested filesystem's qualified flush and clean shutdown path. The Linux reference may use `sync`/unmount; the unikernel path must prove equivalent durability without assuming Linux commands exist.
+5. **Confirm VMM Exit:** Only after VMM exit and the qualified clean filesystem shutdown may the host reconciler report the guest `DORMANT` and release the volume for detachment or host scale-in.
 
 If a planned drain times out at step 2 and engine shutdown has not begun, it may be cancelled by an authorized reconciliation: atomically reopen admission for the same healthy generation with its leases/reservations intact. Once shutdown or a failure fence begins, admission stays closed until recovery. Otherwise retain active leases and reservations and report the blocked drain; do not force-close a transaction to meet the idle timer. If steps 3–5 time out or fail, mark the database generation `UNCERTAIN / FAULTED`, retain the host and volume reservation, alert observability, and refuse automatic forced volume detachment until reconciled. New demand cannot revive or replace a partially stopped generation without reconciliation.
 
