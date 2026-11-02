@@ -172,7 +172,7 @@ Apply the persistent identity and verified-recovery requirements in RFC-0001 Sec
 2. **Write Durability Contract ($RPO = 0$ for committed writes on surviving volume):** A successfully committed transaction acknowledged under the pinned engine/client durability contract must survive on the persistent volume, not solely in guest RAM. HTTP `200 OK` alone is not a commit receipt: validate statement/transaction results and error bodies, including [protocol-level errors](https://surrealdb.com/docs/reference/rest-api/errors). Memory snapshots are not used as the database durability mechanism (`RFC-0001` F10). Admission requires an explicit engine sync/durability mode in the versioned manifest that guarantees acknowledged commits reach the durable path; asynchronous or unverified default modes are rejected. Determine the exact flag/API for the pinned engine release and test it rather than assuming its defaults satisfy this contract.
 3. **Automated Backup & Non-Empty Verification:**
 * Before planned relocation or maintenance, and on a defined schedule following write activity, obtain a verified recovery point using a qualified logical export and/or block-level snapshot procedure. Label whether a snapshot is application-consistent or crash-consistent, and record the engine/image/configuration version needed to recover it. After unexpected host failure, recovery uses the surviving volume or the last verified backup; do not pretend a new export from an unreachable host is available.
-* **Anti-Empty-Backup Gate:** Every backup job must record row/table counts or cryptographic digest metadata and periodically test restoration into an isolated scratch guest. A backup that restores an empty database when prior state was non-empty is treated as a critical failure.
+* **Anti-Empty-Backup Gate:** Every backup job must record row/table counts or cryptographic digest metadata and periodically test restoration into an isolated scratch guest. Use the shared created/integrity-checked/restore-validated catalog states and independent verifier defined in RFC-0001 Section 3; provider completion alone is not validation. A backup that restores an empty database when prior state was non-empty is treated as a critical failure.
 
 ### Storage implementation, recovery objectives and deletion
 
@@ -229,7 +229,7 @@ In addition to the shared in-repository telemetry (`RFC-0001` Section 9), the da
 | --- | --- | --- |
 | **Storage & Volume Health** | Volume used/free bytes, inode usage, read/write IOPS, disk throughput, cloud volume burst-balance/IOPS credits, attach/detach duration | Whether disk size, IOPS provisioning or EBS burst credits are exhausting |
 | **Database Engine** | Active HTTP vs WebSocket connections, query latency (p50/p95/p99), resident memory (RSS) vs guest limit, WAL size, compaction duration | Whether SurrealDB fits the guest memory allocation and whether open sockets prevent idle stop |
-| **Drain & Durability** | `SIGTERM`-to-exit duration, unmount duration, dirty shutdown count, backup age, last verified restore timestamp and record count | Whether shutdown windows are safe and whether backups are current and non-empty |
+| **Drain & Durability** | qualified engine-shutdown-to-exit duration, filesystem flush/close duration, dirty shutdown count, backup age, last verified restore timestamp and record count | Whether shutdown windows are safe and whether backups are current and non-empty |
 | **Cost Attribution** | Compute host hours, retained EBS GB-month, provisioned IOPS, snapshot storage GB-month | True gross cost of the scale-to-zero database tier vs managed RDS/DynamoDB |
 
 ---
@@ -274,7 +274,7 @@ None of these behaviors is claimed today; each must be demonstrated with recorde
 
 ## 12. Acceptance and provenance
 
-Owner direction includes one repository/shared runtime, a SurrealDB-focused database capability, independently managed database identities, zero idle backend compute and optional warm capacity. The concrete first-version storage, fencing, networking, recovery and optional operation-ID adapter contracts are now specified for acceptance. Engine/runtime/library versions and measured thresholds are pinned during qualification, not treated as already working.
+Owner direction includes one repository/shared runtime, a SurrealDB-focused database capability, independently managed database identities, zero idle backend compute and optional warm capacity. The concrete first-version storage, fencing, networking, recovery and optional operation-ID adapter contracts are accepted through the review-and-merge workflow below. Engine/runtime/library versions and measured thresholds are pinned during qualification, not treated as already working.
 
 **Final RFC disposition: accepted upon successful independent review and merge of [PR #1](https://github.com/sufuree/sufuree/pull/1), including RFC-0001.** The owner authorized this headless Claude Code review-and-merge workflow on November 1, 2026. Acceptance concerns design scope only; it does not claim runtime qualification or authorize provisioning, spending, migration or deployment. Native forwarding retains unknown-write outcomes; stronger operation-ID semantics apply only to qualified supported operations.
 
