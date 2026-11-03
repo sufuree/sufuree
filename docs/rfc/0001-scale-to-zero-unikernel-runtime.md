@@ -276,6 +276,12 @@ An application waiting on a sleeping database has a combined startup deadline. L
 
 ## 5. Host scheduling and autoscaling
 
+### Who decides placement
+
+The pool controller is the authoritative scheduler; every backend host runs an agent that executes and reconciles its assigned guests. A capacity pool groups eligible hosts and policy; it does not mean hosts independently claim workloads. The controller filters hosts by capability, storage location, isolation and fresh available resources, chooses a placement, and durably reserves its resources and generation before dispatch. The host agent validates that assignment against current local state, starts the guest and reports readiness. On mismatch or failure it reports the outcome and retains uncertain reservations; only the controller may authorize a different placement. A gateway chooses among ready replicas for traffic, not among hosts for creating a new replica.
+
+Scheduling ownership is separate from assignment transport. An agent may fetch/watch its assignments or receive notifications, but delivery alone cannot create authority: it reconciles the durable assignment identity/generation, acknowledges outcomes and recovers missed/duplicate delivery after reconnect. The concrete transport is an implementation contract still to specify and qualify. Agents do not steal work from a shared queue or independently launch cloud hosts. This is one global placement owner with local execution agents, not competing schedulers.
+
 ### Proposed application replica autoscaler
 
 This policy is a design proposal. Replica count, placement, and paid host capacity are three separate controls with one reconciled desired state. Support explicit replica counts first, then qualify an opt-in `http-concurrency` policy for horizontally safe, ordinary HTTP services. Stateful single-writer databases, session-local applications, jobs and long-lived streams do not inherit this policy automatically.
@@ -304,13 +310,13 @@ Placement sequence:
 1. Filter to healthy hosts with fresh observations and compatible architecture, runtime, network scope, volume location and isolation policy. Exclude draining, failed or uncertain hosts.
 2. Check durable reservations, including guests starting or stopping and VMM overhead. Low average memory usage must not override configured guest RAM requirements.
 3. Prefer an eligible existing host that leaves the least usable spare capacity while respecting headroom and workload constraints. Break ties deterministically. Reserve placement atomically before dispatch.
-4. If no host fits, keep bounded pending demand and ask the pool planner for capacity. Do not launch one host per waiting request.
+4. If no host fits, keep bounded pending demand and ask the pool planner for capacity. Do not launch one host per waiting request. The separately enabled warm-capacity policy may proactively replenish spare capacity before a request is blocked.
 
 Scaling application replicas is a separate policy. Initial workloads default to one execution instance; explicit stateless-replica support can later share traffic. Stateful single writers cannot gain replicas because a queue grows. Packing or spreading guests is placement; choosing among already-ready replicas is request load balancing.
 
 ### Scaling out
 
-The pool policy includes `minHosts` (zero allowed), `maxHosts`, maximum aggregate capacity and gross spend envelope, allowed host shapes/regions, provisioning deadline, idle/warm windows and recovery owner. No actual limits or new spend have been approved here.
+The pool policy includes the [demand-based warm-capacity policy](#demand-based-warm-capacity), `minHosts` (zero allowed), `maxHosts`, maximum aggregate capacity and gross spend envelope, allowed host shapes/regions, provisioning deadline, idle/warm windows and recovery owner. No actual limits or new spend have been approved here.
 
 The planner considers current reservations **and in-flight provisioning**. Group pending workloads into a capacity request rather than reacting independently to every connection. Persist one operation identity and budget reservation before requesting the governed executor to provision. A retry reconciles that operation rather than inventing another. A host counts as usable only after it authenticates, reports compatible capabilities and completes readiness checks.
 
@@ -318,13 +324,57 @@ A workload that cannot fit any allowed host should receive a clear unschedulable
 
 The scoped on-demand IaC executor above defines the intended runtime pool-scaling interface; it still needs implementation and qualification in the owning repository. The existing infrastructure custody material is not evidence that this worker already exists. Once its bounded pool policy is authorized, routine scaling executes within that policy without a new human decision for each request. Include worker execution and IaC-state costs in the idle/active cost model.
 
+### Demand-based warm capacity
+
+Owner direction, November 2, 2026: define and test the reserve policy from the outset, observe its recommendations without buying capacity, and enable paid buffering explicitly later. **Do not size the buffer as a percentage of the fleet.** The target is enough compatible spare capacity to accommodate additional workload placements while another host becomes ready. Existing soft per-host operating headroom remains separate from this pool reserve.
+
+#### Policy and modes
+
+| Setting | Contract |
+| --- | --- |
+| Mode | `off`, `observe` or `active`; initial recommendation is `observe`. Only an explicitly authorized `active` policy may add or retain hosts for the buffer. |
+| Sizing | `minimum` first; `adaptive` is separately enabled after qualification and sufficient fresh measurements. Data availability or fleet growth never enables spending or changes sizing mode automatically. |
+| Minimum reserve | A versioned bundle of configured workload resource profiles and counts, including CPU, RAM, VMM overhead and placement constraints. While demand is active, aim to fit at least one additional configured workload. The operator selects the profile; do not infer an unspecified “typical” guest or reserve one whole host per application. |
+| Limits | Maximum buffer-attributable host count, aggregate allocatable CPU/RAM and estimated gross hourly cost, plus the existing total-pool capacity, launch and period-spend grants. Caps override reserve targets. No numeric spending grant is approved here. |
+| Timing | Evaluation cadence, scale-down stabilization and quiet period; adaptive policy additionally pins startup percentile, burst coverage fraction, lookback, minimum samples and freshness. Admission requires finite nonnegative resource/cost limits, positive timing/sample bounds and percentile/coverage fractions in `(0, 1]`; invalid or missing active-policy bounds are rejected. Values require qualification, not hidden universal constants. |
+| Idle behavior | Default `expire`: after demand and protected work disappear, let the reserve expire through the quiet period. Explicit `retain` permits the configured minimum while idle, subject to the same caps; it is an intentional paid floor. |
+
+`observe` computes proposed host additions/retentions, fit, shortfall and estimated cost from read-only snapshots. It must not create provider operations, reserve executable budget, extend host retention, change placement priorities or prevent normal scale-in. Ordinary demand-driven scaling continues independently. Recommendations are informational and expire; enabling `active` recomputes against current state and grants rather than executing an old observation. Transitions out of `active` stop new buffer purchases and reconcile outstanding operations; they never discard uncertain effects or kill protected work.
+
+#### Reserve calculation and fit
+
+Use the same resource admission model as real scheduling. Partition observations by compatible host/runtime/isolation and storage-location constraints; a host's spare capacity cannot be counted twice across reserve profiles. Subtract system reserves and all existing durable guest reservations, including starting, stopping and uncertain guests. Low sampled CPU or RSS is not permission to reuse allocated guest RAM. Evaluate workload bundles with the actual placement constraints: fragmented free memory, an incompatible architecture or spare capacity in another required volume AZ cannot satisfy a profile.
+
+The minimum bundle is a configurable floor during active demand, not a collection of synthetic running guests. Ready spare slots are usable by admitted work immediately. Do not reserve capacity by launching fake workloads, waking dormant apps/databases or adding one minimum per dormant database instance. Multiple alternative workload profiles must be declared as alternatives; simultaneous burst bundles consume capacity together. A database buffer covers compatible host resources and attachment slots, not a promise that its engine, volume attachment or recovery is already ready.
+
+For the later adaptive policy, define the math over workload placement demand rather than request count or fleet size:
+
+1. For each compatible capacity class, measure elapsed time from committed host launch intent through authenticated schedulable readiness, including provider and bootstrap delay. Let `T` be the configured percentile of fresh observations. Treat failed, timed-out or still-pending starts as censored observations, not fast successes. If their unresolved duration can change the selected percentile, mark the adaptive horizon unavailable and use the minimum fallback; never discard them to manufacture a faster horizon. Degraded provisioning cannot authorize repeated speculative launches.
+2. Partition the configured lookback into complete windows of duration `T`, including zero-arrival windows. Build a burst bundle `B_i` from distinct additional admitted placement requirements arriving in window `i`, preserving their resource profiles and dependency/placement constraints. Count a placement once across retries and request handoff. Exclude probes, rejected traffic, speculative buffer hosts and controller recovery replays. Conservatively give no credit for predicted departures; actual completed releases are already reflected in current capacity. Specify sample timestamps, version and deduplication identity in the observation record.
+3. For a candidate additional-host plan `H`, let `Fits(S, B)` mean the normal placement checker can fit bundle `B` into spare slots `S` simultaneously. With current usable spare `S_ready`, a fully satisfying plan must fit the minimum bundle and satisfy `count(Fits(S_ready + H, B_i)) / N >= q`, where `N` is the number of valid windows and `q` is the configured historical coverage fraction. This checks joint CPU/RAM and placement fit, not independent resource percentiles that may describe no realizable workload. The minimum and each historical burst are alternative scenarios, not added together.
+4. Choose the lowest estimated incremental cost among the bounded, deterministic candidate plans evaluated within the authorized shapes and caps; use stable tie-breaking. If none meets the target, report the achieved coverage and unmet minimum, with the limiting budget, shape, quota or search bound. A bounded search missing a plan is not proof that a workload is intrinsically unschedulable. Historical coverage is a sizing heuristic, never a guarantee about future bursts or first-request latency.
+
+When adaptive history is insufficient, stale or incompatible with the current policy/profile revision, fall back to the configured minimum, with a visible degraded-model condition. Do not fall back to a fleet percentage. Host readiness/reservation evidence must still be fresh: unknown capacity is neither free nor absent, and uncertainty blocks speculative replenishment and metric-driven removal until reconciled. Authoritative inactivity evidence may still permit ordinary safe scale-in. An unreachable provider, quota refusal or failed bootstrap uses the existing bounded operation/backoff policy; the buffer cannot turn a supply failure into a launch storm.
+
+#### Replenishment, cost and release
+
+One pool planner handles real pending placements and the reserve together. Satisfy actual admitted demand first, then calculate the remaining reserve deficit. Provision proactively when the ready reserve is consumed; do not wait for hosts to reach 100% utilization. Project existing in-flight host capacity into the planned fit calculation to avoid buying the same replacement twice, while reporting it separately from ready spare capacity. Stale/unknown operations retain capacity and cost reservations until reconciled; a shortfall is not permission to duplicate them. Hypothetical scenario slots never become workload execution reservations.
+
+Charge whole hosts, including those starting, against the buffer's caps when added or retained solely to meet its target. Spare slots on hosts already required by real demand or explicit baseline floors count toward fit without being billed again as extra buffer hosts. Keep a durable funding/retention reason per host. Transfer a buffer host to demand funding only when the ordinary demand-only planner requires that host, with an atomic total-budget reservation/ledger update; placing a tiny guest there must not merely relabel an unnecessary host and evade the buffer cap. All actual host spend remains in the total-pool ledger regardless of attribution.
+
+Use fresh, versioned gross price estimates for the complete attributable host configuration, including required disks and mandatory per-host charges. Show excluded or usage-dependent costs and actual accrued spend separately; an hourly estimate is not a guarantee of the final cloud bill. Unknown required prices block new speculative purchase. Round plans to real allowed host shapes before checking limits. If the next whole host exceeds any cap, do not buy it or silently increase the grant: report `buffer-budget-limited`/`buffer-capacity-limited` and the expected cold-start exposure. Demand-driven expansion still follows its own existing grants, not the buffer allowance.
+
+Scale down only after the lower reserve requirement remains stable for its configured window, and only where removal leaves the remaining active reserve target satisfied. On cap reduction, policy disablement or idle expiry, seek the largest safely affordable reserve instead of retaining excess merely to meet the former target. Close admission and drain through the existing host lifecycle; never evict an active database, stream or uncertain operation to meet a buffer target. Temporarily unavoidable excess remains charged and visible and blocks further speculative additions. The shared quiet/scale-in logic and buffer policy must produce one retention decision, not opposing controllers that endlessly create and remove each other's capacity.
+
+With `minHosts=0` and idle behavior `expire`, authoritative absence of demand/protected work eventually sets the reserve target to zero and permits termination of the last backend host. Observation alone cannot establish an idle floor. Explicit `minHosts`, `minReplicas` or idle `retain` remain visible paid exceptions. All these contracts are design requirements; neither observation mode nor adaptive sizing is implemented or qualified yet.
+
 ### Scaling in and to zero
 
 For a candidate host, close new placement admission first. Running requests/streams, transactions, jobs and unknown outcomes can prevent drain. Remove idle guests only after workload-specific stop and persistence conditions pass. Host reservations remain charged until cleanup and provider termination are confirmed.
 
 Prefer natural emptying first. Active relocation is a separate capability: a stateless guest can be drained and restarted elsewhere; a stateful guest needs its own storage/writer-transfer protocol. Live migration is not assumed. Do not kill active guests just to improve packing.
 
-Use warm windows and cooldowns to avoid repeated host launches/terminations during bursts. Cloud minimum billing is a cost input, not the guest-idleness rule; do not subtract a guessed fixed shutdown time and call that an exact billing guarantee. If `minHosts=0`, no workload requires execution, all drains complete and data is safe, terminate the last backend host through its owner.
+Use warm windows and cooldowns to avoid repeated host launches/terminations during bursts. Cloud minimum billing is a cost input, not the guest-idleness rule; do not subtract a guessed fixed shutdown time and call that an exact billing guarantee. If `minHosts=0`, idle buffer retention is not explicitly enabled, no workload requires execution, all drains complete and data is safe, terminate the last backend host through its owner.
 
 **Zero backend hosts does not mean a zero AWS bill.** The ingress/controller, its public IP, persistent state, application data, backups and retained databases still cost money. Terminating a host also leaves retained disks unless separately released under retention policy.
 
@@ -340,7 +390,7 @@ Owner direction: ordinary activation should take at most several seconds; starti
 | Host must start, storage must be attached, or artifacts must be fetched | Record each stage separately and enforce a configurable provisioning deadline. Do not promise the ordinary activation target for this path. |
 | Storage recovery after failure or restoration from backup | Separate recovery objective; never skip fencing, integrity checks or recovery to meet a wake target. |
 
-Keep `minHosts=0` as the cost-first baseline. Offer a configurable warm-capacity policy for deployments that prioritize latency, with its extra compute cost visible; even a warm host needs sufficient free capacity and the required data to meet the ordinary activation target. Measure p50/p95/p99 by activation path before selecting numerical service-level commitments. AWS documents [instance startup states](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html), but that lifecycle is not a bound on application readiness. A retained volume reattachment is also distinct from [snapshot restoration and volume initialization](https://docs.aws.amazon.com/ebs/latest/userguide/initalize-volume.html), which can add storage latency.
+Keep `minHosts=0` as the cost-first baseline. Use the [demand-based warm-capacity policy](#demand-based-warm-capacity) for deployments that explicitly enable paid reserve, with its extra compute cost visible; even a warm host needs sufficient free capacity and the required data to meet the ordinary activation target. Measure p50/p95/p99 by activation path before selecting numerical service-level commitments. AWS documents [instance startup states](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html), but that lifecycle is not a bound on application readiness. A retained volume reattachment is also distinct from [snapshot restoration and volume initialization](https://docs.aws.amazon.com/ebs/latest/userguide/initalize-volume.html), which can add storage latency.
 
 The ingress must bound waiting and account for caller deadlines. For ordinary HTTP, return a defined retryable failure if the cold start exceeds that deadline; never silently convert arbitrary requests into asynchronous jobs. A task API can use an asynchronous receipt only when its application contract supports that behavior. A raw TCP client may time out and reconnect; it cannot receive a generic HTTP-style acknowledgement. Do not replay partially forwarded writes automatically.
 
@@ -531,6 +581,12 @@ These are required observations before claiming the corresponding behavior; none
 | Demand handoff interrupted or caller cancelled | No forwarding before host activity admission; lost acknowledgements cannot trigger duplicate execution, and actual backend work remains protected until completion. |
 | Probes and dependent startup | Status/probes do not wake dormant workloads; app/database startup either fits with declared deadlines or fails boundedly without cycles, perpetual wakes or unbounded purchases. |
 | Replica autoscaler under warm-up, stale metrics and budget limits | One desired count across revisions; starting/unknown reservations prevent duplicate growth; absent metrics do not imply idle; blocked dependencies and budgets yield bounded visible outcomes. |
+| Observe versus active buffer | The same input produces a versioned recommendation; observe causes no effects, executable reservations or retention changes. Active enablement revalidates fresh state and explicit grants. |
+| Minimum fit and fragmented capacity | The configured guest/dependency bundle fits as a whole; incompatible AZs, runtime shapes, scattered memory or shared slots cannot be double-counted. |
+| Adaptive sizing fixtures | Complete windows, including zero demand, deterministic placement deduplication, censored startup samples and joint bundle fit produce reproducible targets and coverage; insufficient/stale data falls back to the minimum. |
+| Reserve consumed while another host starts | Actual demand gets slots first; ready and projected spare remain distinct; repeated reconciles purchase no duplicate replacement. |
+| Buffer caps and attribution | Whole-host rounding, prices, in-flight charges and budget transfer cannot exceed authorized additions or hide spend through relabeling. Unknown prices prevent speculative purchase. |
+| Quiet period, policy disable and zero | Sustained lower demand releases excess without churn; protected work remains safe; expire mode reaches zero backend hosts, while explicit retain reports its paid floor. |
 | Savings assessment after migration | Old source costs cease only after authorized retirement; compare complete gross idle floor and active envelope, including overlap and retained storage. |
 
 ### Qualification sequence and adoption
@@ -554,6 +610,8 @@ Primary capability references include [Nanos constraints](https://nanos.org/theb
 No Sufuree runtime, compatible guest image, durable restore, automatic scaling, cost saving or production acceptance is claimed by this specification. Publishing it does not change other repositories or cloud infrastructure.
 
 ## 13. Owner acceptance record
+
+November 2, 2026 amendment: the owner directed a configurable minimum usable reserve, observation before explicit paid activation, and consideration of demand over host-start time instead of a fleet percentage. The demand-based policy above records that direction; its implementation and adaptive qualification remain outstanding.
 
 Previously confirmed direction includes one repository with shared packages, Go on a unikernel for the always-on tier, HashiCorp Go Raft conditional on compatibility, declarative reconciliation, scale-to-zero backend pools, configurable quiet periods, optional paid warm capacity, and the SurrealDB database extension.
 
