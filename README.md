@@ -7,11 +7,11 @@ them, and release backend compute when it is no longer needed. The goal is to
 make keeping many idle applications and database instances affordable, using
 small isolated guests and demand-driven host autoscaling.
 
-**Status: accepted architecture; first single-host slice in progress.** The
-`sufuree host` command runs one host's agent and per-workload gateway sockets for
-stateful unikernel workloads (see [Single-host slice](#single-host-slice)). There
-is no controller, placement, host autoscaling or release yet. Performance,
-durability, provider behavior and cost savings still require qualification.
+**Status: RFC-0001 application/runtime code surface is implemented in-tree; not qualified.**
+`sufuree host` runs the single-host agent (see [Single-host slice](#single-host-slice)).
+`sufuree controller` reconciles App/Pool specs through a durable bbolt store, optional one-voter Raft leadership, a pack-first planner with warm observe/active, demand handoff, and an executor that refuses cloud effects unless `--executor memory` is set.
+Optional `--edge-listen` mounts the HTTP edge. There is no AWS executor, no three-voter quorum, no measured cost saving, and no `sufuree db` (RFC-0002).
+See [RFC-0001 implementation status](docs/implementation/rfc-0001-status.md).
 
 ## How it is designed to work
 
@@ -32,8 +32,8 @@ VM, bare-metal and provider differences remain explicit capability boundaries.
 ## Applications and databases
 
 The design uses one repository, shared runtime packages and a single host-capacity
-planner. Planned `sufuree app` and `sufuree db` command groups manage their
-respective workload types.
+planner. `sufuree app apply` and `sufuree app get` talk to a running controller.
+`sufuree db` is not implemented.
 
 - **Applications:** wake-on-demand routing, replica load balancing, optional
   session affinity, resource admission and safe draining.
@@ -67,6 +67,23 @@ ownership enforcement, runtime compatibility and real cost measurements.
 ## License
 
 [Apache License 2.0](LICENSE).
+
+## Commands
+
+```text
+sufuree version
+sufuree host --config host.json
+sufuree controller --data-dir DIR --listen ADDR \
+  [--executor memory] [--deployment ID] \
+  [--raft-bind ADDR --raft-id ID [--raft-bootstrap]] \
+  [--edge-listen ADDR]
+sufuree app apply --file spec.json --controller http://127.0.0.1:8080
+sufuree app get NAME --controller http://127.0.0.1:8080
+```
+
+`version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` is passed. Raft flags enable a one-voter leadership fence; `--edge-listen` serves the public HTTP edge. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
+
+`app apply` sends kind `App`. A repeat of the same spec does not bump the generation. A stale `resource_version` is rejected.
 
 ## Single-host slice
 
