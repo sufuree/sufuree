@@ -92,8 +92,13 @@ With `boot_credentials`, each boot also gets its own short-lived AWS
 credentials: the agent assumes `role_arn` with its own credentials, tags the
 session with `session_tags` (the role's policy scopes access by them), and
 names it `<id>-g<generation>`, so CloudTrail attributes every use to a workload
-and a generation. A boot fails rather than start without them. `wake_hints`
+and a generation. A boot fails rather than start without them. They are for
+start-up and are not refreshed, so a guest must not depend on them after
+`duration`. `wake_hints`
 takes a `ca_file` for a store with a private CA.
-Stopping is crash-consistent: workloads must acknowledge only writes that are
+Each guest's boot volume is deleted when it exits, and a pidfile lets a
+restarted agent stop a guest an earlier agent left running. A busy hint wakes a
+sleeping workload once per hint generation, and an unreadable hint defers an
+idle stop at most three times. Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.

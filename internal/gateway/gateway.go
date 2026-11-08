@@ -38,7 +38,13 @@ type Gateway struct {
 // Listen binds the socket: parent 0700, socket 0600, a stale socket file
 // replaced, anything else at the path refused.
 func (g *Gateway) Listen() error {
-	if err := os.MkdirAll(filepath.Dir(g.SocketPath), 0o700); err != nil {
+	dir := filepath.Dir(g.SocketPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// The socket is created under the process umask and narrowed after;
+	// a 0700 directory keeps others out in between.
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	if fi, err := os.Lstat(g.SocketPath); err == nil {

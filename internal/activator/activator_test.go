@@ -60,9 +60,11 @@ func (l *fakeLauncher) count() int {
 }
 
 type fakeHints struct {
-	mu sync.Mutex
-	h  wakehint.Hint
-	ok bool
+	mu    sync.Mutex
+	h     wakehint.Hint
+	ok    bool
+	err   error
+	reads int
 }
 
 func (f *fakeHints) set(h wakehint.Hint) {
@@ -74,7 +76,8 @@ func (f *fakeHints) set(h wakehint.Hint) {
 func (f *fakeHints) Read(context.Context, string) (wakehint.Hint, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.h, f.ok, nil
+	f.reads++
+	return f.h, f.ok, f.err
 }
 
 func spec() workload.Spec {
@@ -370,5 +373,63 @@ func TestBootFailsClosedWithoutCredentials(t *testing.T) {
 		if l.count() != 0 {
 			t.Fatalf("%s: guest booted without credentials", name)
 		}
+	}
+}
+
+func TestNoLeaseOrWakeAfterShutdown(t *testing.T) {
+	l := &fakeLauncher{}
+	a, _ := newAct(t, l, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go a.Run(ctx)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	cancel()
+	<-a.Done()
+	waitFor(t, "guest stopped at shutdown", func() bool { st, _, _, _ := a.Snapshot(); return st == Asleep })
+	if _, _, err := a.Acquire(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Acquire after shutdown: err = %v", err)
+	}
+	if l.count() != 1 {
+		t.Fatalf("booted %d guests; a wake after shutdown would leak one", l.count())
+	}
+	if _, _, active, _ := a.Snapshot(); active != 0 {
+		t.Fatalf("lease leaked: active %d", active)
+	}
+}
+
+func TestStaleBusyHintWakesOnlyOnce(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{}
+	a, _ := newAct(t, l, h, nil)
+	// Generation 7 crashed while busy and nothing republishes the hint.
+	h.set(wakehint.Hint{Version: 1, Generation: 7, Busy: true})
+	run(t, a)
+	waitFor(t, "one wake for the interrupted work", func() bool { return l.count() == 1 })
+	waitFor(t, "idle stop of that boot", func() bool { _, _, _, s := a.Snapshot(); return s.IdleStops == 1 })
+	time.Sleep(300 * time.Millisecond)
+	if l.count() != 1 {
+		t.Fatalf("stale busy hint woke the workload %d times", l.count())
+	}
+	// A newer generation's busy hint wakes it again.
+	h.set(wakehint.Hint{Version: 1, Generation: 8, Busy: true})
+	waitFor(t, "wake for a newer busy hint", func() bool { return l.count() == 2 })
+}
+
+func TestUnreadableHintDefersIdleStopBoundedly(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{err: errors.New("store down")}
+	a, _ := newAct(t, l, h, nil)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	run(t, a)
+	waitFor(t, "stop despite an unreadable hint", func() bool { st, _, _, _ := a.Snapshot(); return st == Asleep })
+	if _, _, _, s := a.Snapshot(); s.BusyVetoes != maxHintErrors {
+		t.Fatalf("vetoes = %d, want %d", s.BusyVetoes, maxHintErrors)
 	}
 }

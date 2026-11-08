@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,18 +74,17 @@ func (q *QEMU) opsHome() string {
 
 // createVolume builds a TFS volume labelled label from srcDir and moves it
 // to dst. Ops registers volumes by name in a shared directory, so any
-// leftover volume with the same label is moved aside first.
+// leftover volume with the same label (from an interrupted create, possibly
+// holding boot secrets) is deleted first.
 func (q *QEMU) createVolume(ctx context.Context, label, srcDir string, sizeMiB int, dst string) error {
 	q.volMu.Lock()
 	defer q.volMu.Unlock()
 	vdir := filepath.Join(q.opsHome(), "volumes")
-	held := filepath.Join(q.opsHome(), "volumes.held")
-	if err := os.MkdirAll(held, 0o700); err != nil {
-		return err
-	}
 	old, _ := filepath.Glob(filepath.Join(vdir, label+":*.raw"))
 	for _, f := range old {
-		_ = os.Rename(f, filepath.Join(held, filepath.Base(f)))
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	cmd := exec.CommandContext(ctx, q.bin(q.OpsBin, "ops"), "volume", "create", label, "-d", srcDir, "-s", fmt.Sprintf("%dm", sizeMiB))
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -93,6 +93,9 @@ func (q *QEMU) createVolume(ctx context.Context, label, srcDir string, sizeMiB i
 	made, _ := filepath.Glob(filepath.Join(vdir, label+":*.raw"))
 	if len(made) != 1 {
 		return fmt.Errorf("ops volume create %s: expected one volume, found %d", label, len(made))
+	}
+	if err := os.Chmod(made[0], 0o600); err != nil {
+		return err
 	}
 	return os.Rename(made[0], dst)
 }
@@ -181,11 +184,65 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 	cmd := exec.Command(q.bin(q.QEMUBin, "qemu-system-x86_64"), args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		_ = os.Remove(boot)
 		return nil, fmt.Errorf("qemu: %w", err)
 	}
+	// The pidfile lets a restarted agent stop a guest it lost track of.
+	pidfile := q.pidfile(w.ID)
+	if err := os.WriteFile(pidfile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = os.Remove(boot)
+		return nil, err
+	}
 	g := &qemuGuest{cmd: cmd, addr: fmt.Sprintf("127.0.0.1:%d", port), exited: make(chan struct{})}
-	go func() { _ = cmd.Wait(); close(g.exited) }()
+	go func() {
+		_ = cmd.Wait()
+		// The boot volume holds this boot's env and secret files.
+		_ = os.Remove(boot)
+		_ = os.Remove(pidfile)
+		close(g.exited)
+	}()
 	return g, nil
+}
+
+func (q *QEMU) pidfile(id string) string { return filepath.Join(q.DataDir, "volumes", id+".pid") }
+
+// Reap stops a guest left running by an earlier agent (crash or kill) and
+// deletes its boot volume. It kills the recorded process only if its
+// command line still names this workload's state volume, so a reused pid
+// is left alone.
+func (q *QEMU) Reap(id string) (bool, error) {
+	pidfile := q.pidfile(id)
+	boot := filepath.Join(q.DataDir, "volumes", id+".boot.raw")
+	defer func() { _ = os.Remove(boot) }()
+	raw, err := os.ReadFile(pidfile)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 1 {
+		return false, os.Remove(pidfile)
+	}
+	state := filepath.Join(q.DataDir, "volumes", id+".state.raw")
+	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil || !strings.Contains(string(out), state) {
+		return false, os.Remove(pidfile) // gone, or no longer ours
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return false, err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			return true, fmt.Errorf("guest pid %d did not exit", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true, os.Remove(pidfile)
 }
 
 type qemuGuest struct {
