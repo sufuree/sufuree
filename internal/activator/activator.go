@@ -223,10 +223,14 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	files, err := a.spec.ResolveBootFiles(a.opt.Getenv)
+	if err != nil {
+		return nil, 0, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.spec.StartupTimeout.Duration)
 	defer cancel()
 	t0 := time.Now()
-	g, err := a.launcher.Boot(ctx, a.spec, gen, env)
+	g, err := a.launcher.Boot(ctx, a.spec, gen, env, files)
 	if err != nil {
 		return nil, 0, err
 	}

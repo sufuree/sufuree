@@ -41,7 +41,7 @@ type Guest interface {
 
 // Launcher boots guests.
 type Launcher interface {
-	Boot(ctx context.Context, w workload.Spec, generation uint64, env map[string]string) (Guest, error)
+	Boot(ctx context.Context, w workload.Spec, generation uint64, env map[string]string, files map[string][]byte) (Guest, error)
 }
 
 // QEMU is the KVM launcher.
@@ -110,7 +110,7 @@ func (q *QEMU) dirs(id string) (vol, logs string, err error) {
 
 // Boot prepares volumes and starts QEMU. It returns once the process has
 // started; readiness is the caller's check.
-func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env map[string]string) (Guest, error) {
+func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env map[string]string, files map[string][]byte) (Guest, error) {
 	vol, logs, err := q.dirs(w.ID)
 	if err != nil {
 		return nil, err
@@ -143,6 +143,11 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 	}
 	if err := os.WriteFile(filepath.Join(src, w.BootEnvFile), []byte(b.String()), 0o600); err != nil {
 		return nil, err
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(src, name), data, 0o600); err != nil {
+			return nil, err
+		}
 	}
 	boot := filepath.Join(vol, w.ID+".boot.raw")
 	if err := q.createVolume(ctx, "boot", src, 8, boot); err != nil {

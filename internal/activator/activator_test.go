@@ -37,7 +37,10 @@ type fakeLauncher struct {
 	delay  time.Duration
 }
 
-func (l *fakeLauncher) Boot(ctx context.Context, w workload.Spec, gen uint64, env map[string]string) (guest.Guest, error) {
+func (l *fakeLauncher) Boot(ctx context.Context, w workload.Spec, gen uint64, env map[string]string, files map[string][]byte) (guest.Guest, error) {
+	if string(files["key"]) != "s3cret" {
+		return nil, errors.New("boot file not resolved")
+	}
 	time.Sleep(l.delay)
 	g := &fakeGuest{addr: "guest-" + env[w.GenerationEnvKey], exited: make(chan struct{})}
 	l.mu.Lock()
@@ -77,6 +80,7 @@ func spec() workload.Spec {
 		ID: "w1", Image: "img", MemoryMiB: 128, GuestPort: 8080, StateMiB: 64,
 		BootEnvFile: "zati.env", GenerationEnvKey: "GEN",
 		BootEnv:        map[string]string{"SECRET": "env:TEST_SECRET", "PLAIN": "x"},
+		BootFiles:      map[string]string{"key": "env:TEST_SECRET"},
 		HintPrefix:     "inst/w1",
 		IdleTimeout:    workload.Duration{Duration: 50 * time.Millisecond},
 		StartupTimeout: workload.Duration{Duration: 300 * time.Millisecond},
