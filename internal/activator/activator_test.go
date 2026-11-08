@@ -539,12 +539,18 @@ func TestBootCarriesTheHighestProgressSeen(t *testing.T) {
 		{&wakehint.Progress{Epoch: 2, Seq: 10}, "2:10"},
 		{&wakehint.Progress{Epoch: 2, Seq: 5}, "2:10"}, // a replayed hint
 		{nil, "2:10"},
+		{&wakehint.Progress{Epoch: 1 << 40, Seq: 1}, "2:10"}, // never issued: ignored
 		{&wakehint.Progress{Epoch: 3, Seq: 1}, "3:1"},
 	} {
 		h.set(wakehint.Hint{Version: 1, Progress: c.p})
 		if env := wake(); env["MIN"] != c.want {
 			t.Fatalf("hint progress %+v: boot got %q, want %q", c.p, env["MIN"], c.want)
 		}
+	}
+	// A hint from a generation never issued is ignored even with a low epoch.
+	h.set(wakehint.Hint{Version: 1, Generation: 1 << 40, Progress: &wakehint.Progress{Epoch: 3, Seq: 9}})
+	if env := wake(); env["MIN"] != "3:1" {
+		t.Fatalf("hint from an unissued generation: boot got %q, want 3:1", env["MIN"])
 	}
 }
 

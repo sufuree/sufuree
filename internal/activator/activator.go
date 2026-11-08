@@ -363,13 +363,20 @@ func (a *Activator) noteProgress(h wakehint.Hint) error {
 	if h.Progress == nil {
 		return nil
 	}
+	// Progress is unauthenticated, but it can be bounded: a hint naming a
+	// generation this host never issued is forged or from another host,
+	// and would otherwise block every boot.
+	r, err := a.journal.Get(a.spec.ID)
+	if err != nil {
+		return err
+	}
+	if h.Progress.Epoch > r.Generation || h.Generation > r.Generation {
+		a.log.Warn("ignoring hint progress naming a generation never issued; check the hint store",
+			"hint_generation", h.Generation, "epoch", h.Progress.Epoch, "issued", r.Generation)
+		return nil
+	}
 	prev, up, err := a.journal.AdvanceProgress(a.spec.ID, h.Progress.Epoch, h.Progress.Seq)
-	switch {
-	case up && prev.Epoch != 0 && h.Progress.Epoch > prev.Epoch+1000:
-		// Epochs are boot generations; a jump this large is a forged or
-		// corrupt hint that would block every boot. See README to reset.
-		a.log.Warn("progress epoch jumped; check the hint store", "from", prev.Epoch, "to", h.Progress.Epoch, "seq", h.Progress.Seq)
-	case up && h.Progress.Epoch != prev.Epoch:
+	if up && h.Progress.Epoch != prev.Epoch {
 		a.log.Info("progress epoch advanced", "epoch", h.Progress.Epoch, "seq", h.Progress.Seq)
 	}
 	return err
