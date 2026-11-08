@@ -85,3 +85,26 @@ func TestBootCredentials(t *testing.T) {
 		t.Fatalf("ca_file: %v %+v", err, c.WakeHints)
 	}
 }
+
+func TestRefusesInjection(t *testing.T) {
+	withCreds := strings.Replace(good, `"boot_env":{`, creds+`"boot_env":{`, 1)
+	for name, s := range map[string]string{
+		"comma in image":     strings.Replace(good, `"/i.img"`, `"/i.img,snapshot=off"`, 1),
+		"comma in data_dir":  strings.Replace(good, `"data_dir":"/d"`, `"data_dir":"/d,x"`, 1),
+		"generation key '='": strings.Replace(good, `"ZATI_REPLICA_GENERATION"`, `"A=B"`, 1),
+		"long id with creds": strings.Replace(strings.Replace(withCreds, `"inst-1"`, `"`+strings.Repeat("a", 43)+`"`, 1), `"inst/inst-1","idle`, `"inst/x","idle`, 1),
+	} {
+		if _, err := Load(write(t, s)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	c, err := Load(write(t, good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"a\nZATI_REPLICA_GENERATION=1", "a\rb"} {
+		if _, err := c.Workloads[0].ResolveBootEnv(1, func(string) (string, bool) { return v, true }); err == nil {
+			t.Errorf("multi-line resolved value %q accepted", v)
+		}
+	}
+}

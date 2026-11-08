@@ -32,6 +32,11 @@ func Open(dir string) (*Journal, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// Make the directory entry itself durable, so a crash on a fresh
+	// install cannot lose it and reissue generation 1.
+	if err := syncDir(filepath.Dir(dir)); err != nil {
+		return nil, err
+	}
 	return &Journal{dir: dir}, nil
 }
 
@@ -99,7 +104,11 @@ func (j *Journal) put(id string, r Record) error {
 	if err := os.Rename(tmp, j.path(id)); err != nil {
 		return err
 	}
-	d, err := os.Open(j.dir)
+	return syncDir(j.dir)
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}

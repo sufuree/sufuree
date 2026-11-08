@@ -47,6 +47,14 @@ const (
 // ErrUnavailable means the workload could not be made ready.
 var ErrUnavailable = errors.New("activator: workload could not be made ready")
 
+// ErrClosed is returned once the activator is shutting down.
+var ErrClosed = errors.New("activator: shutting down")
+
+// maxHintErrors is how many consecutive unreadable hints may veto an idle
+// stop. The hint is advisory, so after that the stop goes ahead: stopping is
+// crash-consistent and the next wake resumes any work.
+const maxHintErrors = 3
+
 // Options tunes the control loop; zero values take defaults.
 type Options struct {
 	Tick      time.Duration // control loop period (default 1s)
@@ -81,6 +89,10 @@ type Activator struct {
 	lastActive  time.Time
 	awakeSince  time.Time
 	lastHintAt  time.Time
+	closed      bool   // shutting down: no new leases or wakes
+	busyWoke    bool   // a busy hint has caused a wake
+	busyWokeGen uint64 // the hint generation of that wake
+	hintErrs    int    // consecutive unreadable hints at idle stop
 	stats       Stats
 	stopControl chan struct{}
 	done        chan struct{}
@@ -134,6 +146,11 @@ func (a *Activator) Acquire(ctx context.Context) (addr string, release func(), e
 	a.mu.Lock()
 	a.active++ // counted before waiting, so an idle stop cannot race us
 	for {
+		if a.closed {
+			a.dropLease()
+			a.mu.Unlock()
+			return "", nil, ErrClosed
+		}
 		switch a.state {
 		case Awake:
 			addr := a.guest.Addr()
@@ -326,13 +343,29 @@ func (a *Activator) tick(ctx context.Context) {
 
 	switch {
 	case state == Awake && active == 0 && idleFor >= a.spec.IdleTimeout.Duration && upFor >= a.spec.MinAwake.Duration:
-		if busy, err := a.busy(ctx, gen); err != nil || busy {
-			a.mu.Lock()
+		busy, err := a.busy(ctx, gen)
+		a.mu.Lock()
+		if err != nil {
+			a.hintErrs++
+		} else {
+			a.hintErrs = 0
+		}
+		errs := a.hintErrs
+		veto := busy || (err != nil && errs <= maxHintErrors)
+		if veto {
 			a.stats.BusyVetoes++
 			a.lastActive = time.Now() // re-check after another idle period
-			a.mu.Unlock()
-			a.log.Info("idle stop vetoed", "busy", busy, "err", err)
+		}
+		a.mu.Unlock()
+		switch {
+		case veto && err != nil:
+			a.log.Warn("idle stop deferred: hint unreadable", "attempt", errs, "of", maxHintErrors, "err", err)
 			return
+		case veto:
+			a.log.Info("idle stop vetoed: busy", "generation", gen)
+			return
+		case err != nil:
+			a.log.Warn("hint still unreadable; stopping anyway (hints are advisory)", "err", err)
 		}
 		a.stopIfStillIdle()
 	case state == Asleep && a.hints != nil && a.spec.HintPrefix != "" && pollDue:
@@ -343,13 +376,17 @@ func (a *Activator) tick(ctx context.Context) {
 		if err != nil || !ok {
 			return
 		}
-		due := h.Busy || (h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration)))
-		if !due {
-			return
-		}
+		scheduled := h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration))
 		a.mu.Lock()
-		if a.state == Asleep {
-			a.log.Info("scheduled wake", "busy", h.Busy, "next_due", h.NextDue)
+		// A busy hint wakes the workload once per hint generation: a boot
+		// that never republishes would otherwise be woken, idle-stopped and
+		// woken again by the same stale hint.
+		busyWake := h.Busy && (!a.busyWoke || h.Generation > a.busyWokeGen)
+		if (scheduled || busyWake) && a.state == Asleep && !a.closed {
+			if h.Busy {
+				a.busyWoke, a.busyWokeGen = true, h.Generation
+			}
+			a.log.Info("scheduled wake", "busy", h.Busy, "hint_generation", h.Generation, "next_due", h.NextDue)
 			a.beginWake(true)
 		}
 		a.mu.Unlock()
@@ -371,7 +408,7 @@ func (a *Activator) busy(ctx context.Context, gen uint64) (bool, error) {
 
 func (a *Activator) stopIfStillIdle() {
 	a.mu.Lock()
-	if a.state != Awake || a.active != 0 {
+	if a.state != Awake || a.active != 0 || time.Since(a.lastActive) < a.spec.IdleTimeout.Duration {
 		a.mu.Unlock()
 		return
 	}
@@ -391,8 +428,10 @@ func (a *Activator) stopIfStillIdle() {
 	a.mu.Unlock()
 }
 
+// shutdown refuses new leases and wakes, then stops the guest.
 func (a *Activator) shutdown() {
 	a.mu.Lock()
+	a.closed = true
 	g := a.guest
 	wait := a.transition
 	st := a.state

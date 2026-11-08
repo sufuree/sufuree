@@ -97,6 +97,11 @@ func run(args []string) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(cfg.Workloads))
 	for _, w := range cfg.Workloads {
+		if reaped, err := launcher.Reap(w.ID); err != nil {
+			return fmt.Errorf("workload %s: reaping a leftover guest: %w", w.ID, err)
+		} else if reaped {
+			log.Warn("stopped a guest left running by an earlier agent", "workload", w.ID)
+		}
 		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
 		gw := &gateway.Gateway{
 			ID: w.ID, SocketPath: filepath.Join(cfg.SocketDir, w.ID+".sock"), Act: act,

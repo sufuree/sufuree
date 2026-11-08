@@ -45,7 +45,8 @@ type ObjectStore struct {
 // role's policy can limit the guest to its own resources
 // (aws:PrincipalTag) and every use is attributable to a workload and a
 // generation. The credentials reach the guest in the boot env under the
-// keys in Env.
+// keys in Env. They are for start-up: they are not refreshed, so a guest
+// awake longer than Duration must not depend on them after that.
 type AWSRole struct {
 	RoleARN     string            `json:"role_arn"`
 	Region      string            `json:"region"`
@@ -148,6 +149,9 @@ func (c HostConfig) Validate() error {
 	if c.DataDir == "" || c.SocketDir == "" {
 		return errors.New("host config: data_dir and socket_dir are required")
 	}
+	if strings.Contains(c.DataDir, ",") {
+		return errors.New("host config: data_dir must not contain a comma (QEMU option syntax)")
+	}
 	if len(c.Workloads) == 0 {
 		return errors.New("host config: no workloads")
 	}
@@ -182,8 +186,10 @@ func (w Spec) validate() error {
 		return bad("state_mib must be at least 16")
 	case !plainName(w.BootEnvFile):
 		return bad("boot_env_file must be a plain file name")
-	case w.GenerationEnvKey == "":
-		return bad("generation_env_key is required")
+	case w.GenerationEnvKey == "" || strings.ContainsAny(w.GenerationEnvKey, "=\n\r"):
+		return bad("generation_env_key is required and must be a plain key")
+	case strings.Contains(w.Image, ","):
+		return bad("image path must not contain a comma (QEMU option syntax)")
 	case w.IdleTimeout.Duration <= 0, w.StartupTimeout.Duration <= 0:
 		return bad("idle_timeout and startup_timeout must be positive")
 	}
@@ -198,6 +204,11 @@ func (w Spec) validate() error {
 		}
 	}
 	if c := w.BootCredentials; c != nil {
+		// <id>-g<generation> must fit STS's 64 characters untruncated, so
+		// every session name stays unique.
+		if len(w.ID) > 64-len("-g")-20 {
+			return bad("ids longer than 42 characters cannot use boot_credentials")
+		}
 		if err := c.validate(w); err != nil {
 			return bad(err.Error())
 		}
@@ -277,6 +288,9 @@ func (w Spec) ResolveBootEnv(generation uint64, getenv func(string) (string, boo
 		val, err := w.resolve("boot_env "+k, v, getenv)
 		if err != nil {
 			return nil, err
+		}
+		if strings.ContainsAny(val, "\n\r") {
+			return nil, fmt.Errorf("workload %q: boot_env %s resolves to a multi-line value", w.ID, k)
 		}
 		out[k] = val
 	}
