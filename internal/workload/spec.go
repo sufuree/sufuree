@@ -258,8 +258,8 @@ func (c *AWSRole) validate(w Spec) error {
 	seen := map[string]bool{}
 	for _, k := range c.Env.Keys() {
 		_, inEnv := w.BootEnv[k]
-		if k == "" || strings.ContainsAny(k, "=\n") || seen[k] || inEnv || k == w.GenerationEnvKey {
-			return errors.New("boot_credentials.env needs three distinct keys not used by boot_env or generation_env_key")
+		if k == "" || strings.ContainsAny(k, "=\n") || seen[k] || inEnv || k == w.GenerationEnvKey || k == w.ProgressEnvKey {
+			return errors.New("boot_credentials.env needs three distinct keys not used by boot_env, generation_env_key or progress_env_key")
 		}
 		seen[k] = true
 	}

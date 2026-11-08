@@ -68,16 +68,17 @@ func TestBootCredentials(t *testing.T) {
 		t.Fatalf("boot_credentials = %+v", r)
 	}
 	for name, s := range map[string]string{
-		"no tags":       strings.Replace(withCreds, `{"replica":"inst/inst-1"}`, `{}`, 1),
-		"bad tag":       strings.Replace(withCreds, `"inst/inst-1"`, `"inst#1"`, 1),
-		"not a role":    strings.Replace(withCreds, `:role/guest`, `:user/guest`, 1),
-		"no region":     strings.Replace(withCreds, `"region":"us-west-1",`, ``, 1),
-		"short":         strings.Replace(withCreds, `"15m"`, `"5m"`, 1),
-		"long":          strings.Replace(withCreds, `"15m"`, `"2h"`, 1),
-		"dup env key":   strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"AK"`, 1),
-		"env collision": strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"K"`, 1),
-		"gen collision": strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"ZATI_REPLICA_GENERATION"`, 1),
-		"unknown field": strings.Replace(withCreds, `"region":"us-west-1",`, `"region":"us-west-1","policy":"*",`, 1),
+		"no tags":            strings.Replace(withCreds, `{"replica":"inst/inst-1"}`, `{}`, 1),
+		"bad tag":            strings.Replace(withCreds, `"inst/inst-1"`, `"inst#1"`, 1),
+		"not a role":         strings.Replace(withCreds, `:role/guest`, `:user/guest`, 1),
+		"no region":          strings.Replace(withCreds, `"region":"us-west-1",`, ``, 1),
+		"short":              strings.Replace(withCreds, `"15m"`, `"5m"`, 1),
+		"long":               strings.Replace(withCreds, `"15m"`, `"2h"`, 1),
+		"dup env key":        strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"AK"`, 1),
+		"env collision":      strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"K"`, 1),
+		"progress collision": strings.Replace(withCreds, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"ST",`, 1),
+		"gen collision":      strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"ZATI_REPLICA_GENERATION"`, 1),
+		"unknown field":      strings.Replace(withCreds, `"region":"us-west-1",`, `"region":"us-west-1","policy":"*",`, 1),
 	} {
 		if _, err := Load(write(t, s)); err == nil {
 			t.Errorf("%s: accepted", name)

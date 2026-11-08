@@ -547,3 +547,49 @@ func TestBootCarriesTheHighestProgressSeen(t *testing.T) {
 		}
 	}
 }
+
+// TestProgressIsRecordedAfterACrashAndKeptWhenTheHintIsUnreadable: a guest
+// exit records the final hint's progress, and a boot whose own hint read
+// fails still gets the recorded floor.
+func TestProgressIsRecordedAfterACrashAndKeptWhenTheHintIsUnreadable(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{}
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := spec()
+	w.ProgressEnvKey = "MIN"
+	a := New(w, j, l, h, Options{
+		Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond,
+		Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+		Ready:  func(context.Context, string) error { return nil },
+	})
+	run(t, a)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	h.set(wakehint.Hint{Version: 1, Progress: &wakehint.Progress{Epoch: 1, Seq: 7}})
+	l.mu.Lock()
+	g := l.guests[0]
+	l.mu.Unlock()
+	g.once.Do(func() { close(g.exited) }) // a crash
+	waitFor(t, "progress recorded after exit", func() bool {
+		r, _ := j.Get(w.ID)
+		return r.ProgressEpoch == 1 && r.ProgressSeq == 7
+	})
+	h.mu.Lock()
+	h.err = errors.New("store unreachable")
+	h.mu.Unlock()
+	if _, release, err = a.Acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if got := l.envs[len(l.envs)-1]["MIN"]; got != "1:7" {
+		t.Fatalf("boot with an unreadable hint got %q, want the recorded 1:7", got)
+	}
+}
