@@ -15,7 +15,9 @@ import (
 	"sync"
 )
 
-// Record is one workload's durable state on this host.
+// Record is one workload's durable state on this host. A record holding
+// progress is written as version 2, so an agent that predates progress
+// refuses it rather than rewriting it without the floor.
 type Record struct {
 	Version    int    `json:"version"`
 	Generation uint64 `json:"generation"` // last generation issued
@@ -62,7 +64,7 @@ func (j *Journal) get(id string) (Record, error) {
 		return Record{}, err
 	}
 	var r Record
-	if err := json.Unmarshal(data, &r); err != nil || r.Version != 1 {
+	if err := json.Unmarshal(data, &r); err != nil || (r.Version != 1 && r.Version != 2) {
 		return Record{}, fmt.Errorf("journal: record for %q is corrupt", id)
 	}
 	return r, nil
@@ -84,20 +86,25 @@ func (j *Journal) NextGeneration(id string) (uint64, error) {
 	return r.Generation, nil
 }
 
+// Progress is a recorded (epoch, seq).
+type Progress struct{ Epoch, Seq uint64 }
+
 // AdvanceProgress durably records (epoch, seq) for id if it is above the
-// recorded progress, and reports whether it was.
-func (j *Journal) AdvanceProgress(id string, epoch, seq uint64) (bool, error) {
+// recorded progress. It returns the previous progress and whether it moved.
+func (j *Journal) AdvanceProgress(id string, epoch, seq uint64) (Progress, bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	r, err := j.get(id)
 	if err != nil {
-		return false, err
+		return Progress{}, false, err
 	}
+	prev := Progress{r.ProgressEpoch, r.ProgressSeq}
 	if epoch < r.ProgressEpoch || (epoch == r.ProgressEpoch && seq <= r.ProgressSeq) {
-		return false, nil
+		return prev, false, nil
 	}
 	r.ProgressEpoch, r.ProgressSeq = epoch, seq
-	return true, j.put(id, r)
+	r.Version = 2
+	return prev, true, j.put(id, r)
 }
 
 // put writes atomically and durably: temp file, fsync, rename, dir fsync.

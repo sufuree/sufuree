@@ -113,6 +113,10 @@ each guest exits) in its journal and passes it to every boot as
 behind it, which the store alone cannot show. The agent cannot authenticate
 progress: a forged higher value can keep the workload from booting, never make
 it accept less. Progress reported after the agent's last read is not covered.
+A record holding progress is journal version 2, which an older agent refuses
+rather than rewrite without it. To clear a forged floor (the agent warns on an
+epoch jump), stop the agent and remove `progress_epoch` and `progress_seq`
+from `data_dir/journal/<id>.json`, keeping `generation`.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.

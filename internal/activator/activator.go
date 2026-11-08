@@ -305,6 +305,9 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 // CredentialIssueTimeout bounds issuing one boot's credentials.
 const CredentialIssueTimeout = 30 * time.Second
 
+// ProgressReadTimeout bounds the hint read before each boot (progress_env_key).
+const ProgressReadTimeout = 5 * time.Second
+
 // defaultAttempts is the boot attempts per wake when Options.Attempts is 0.
 const defaultAttempts = 2
 
@@ -318,6 +321,9 @@ func WakeBudget(w workload.Spec, attempts int) time.Duration {
 	per := w.StartupTimeout.Duration
 	if w.BootCredentials != nil {
 		per += CredentialIssueTimeout
+	}
+	if w.ProgressEnvKey != "" {
+		per += ProgressReadTimeout
 	}
 	return time.Duration(attempts) * per
 }
@@ -357,9 +363,14 @@ func (a *Activator) noteProgress(h wakehint.Hint) error {
 	if h.Progress == nil {
 		return nil
 	}
-	up, err := a.journal.AdvanceProgress(a.spec.ID, h.Progress.Epoch, h.Progress.Seq)
-	if up {
-		a.log.Debug("progress recorded", "epoch", h.Progress.Epoch, "seq", h.Progress.Seq)
+	prev, up, err := a.journal.AdvanceProgress(a.spec.ID, h.Progress.Epoch, h.Progress.Seq)
+	switch {
+	case up && prev.Epoch != 0 && h.Progress.Epoch > prev.Epoch+1000:
+		// Epochs are boot generations; a jump this large is a forged or
+		// corrupt hint that would block every boot. See README to reset.
+		a.log.Warn("progress epoch jumped; check the hint store", "from", prev.Epoch, "to", h.Progress.Epoch, "seq", h.Progress.Seq)
+	case up && h.Progress.Epoch != prev.Epoch:
+		a.log.Info("progress epoch advanced", "epoch", h.Progress.Epoch, "seq", h.Progress.Seq)
 	}
 	return err
 }
@@ -371,7 +382,7 @@ func (a *Activator) progressEnv(env map[string]string) error {
 	if a.spec.ProgressEnvKey == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ProgressReadTimeout)
 	err := a.recordProgress(ctx)
 	cancel()
 	if err != nil {
@@ -392,19 +403,21 @@ func (a *Activator) progressEnv(env map[string]string) error {
 // hint's progress, while the store is least likely to have been altered.
 func (a *Activator) watchExit(g guest.Guest, gen uint64) {
 	<-g.Exited()
+	a.mu.Lock()
+	if a.guest == g && a.state == Awake {
+		a.state, a.guest = Asleep, nil
+		a.stats.UnexpectedExits++
+		a.log.Warn("guest exited unexpectedly", "generation", gen)
+	}
+	a.mu.Unlock()
+	// After the state change, so a dead guest is never handed out while
+	// the store is read. A boot that starts meanwhile reads it itself.
 	if a.spec.ProgressEnvKey != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := a.recordProgress(ctx); err != nil {
 			a.log.Warn("recording progress after exit", "err", err)
 		}
 		cancel()
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.guest == g && a.state == Awake {
-		a.state, a.guest = Asleep, nil
-		a.stats.UnexpectedExits++
-		a.log.Warn("guest exited unexpectedly", "generation", gen)
 	}
 }
 
