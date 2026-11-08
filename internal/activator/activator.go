@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sufuree/sufuree/internal/bootcred"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
 	"github.com/sufuree/sufuree/internal/wakehint"
@@ -56,6 +57,9 @@ type Options struct {
 	Logger    *slog.Logger
 	// Ready probes a booted guest; default is an HTTP response on Addr.
 	Ready func(ctx context.Context, addr string) error
+	// Credentials issues per-boot credentials for a workload with
+	// boot_credentials. A boot of such a workload fails without it.
+	Credentials bootcred.Issuer
 }
 
 // Activator manages one workload.
@@ -227,6 +231,11 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	if a.spec.BootCredentials != nil {
+		if err := a.issueCredentials(gen, env); err != nil {
+			return nil, 0, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.spec.StartupTimeout.Duration)
 	defer cancel()
 	t0 := time.Now()
@@ -254,6 +263,25 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// issueCredentials adds this generation's scoped credentials to env.
+func (a *Activator) issueCredentials(gen uint64, env map[string]string) error {
+	if a.opt.Credentials == nil {
+		return fmt.Errorf("workload %q has boot_credentials but the agent has no credential issuer", a.spec.ID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	creds, err := a.opt.Credentials.Issue(ctx, a.spec, gen)
+	if err != nil {
+		return err
+	}
+	for k, v := range creds {
+		env[k] = v
+	}
+	a.log.Info("boot credentials issued", "generation", gen, "session", bootcred.SessionName(a.spec.ID, gen), "ms", time.Since(t0).Milliseconds())
+	return nil
 }
 
 // watchExit returns the workload to Asleep if its guest ends on its own

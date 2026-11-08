@@ -3,11 +3,13 @@ package activator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sufuree/sufuree/internal/bootcred"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
 	"github.com/sufuree/sufuree/internal/wakehint"
@@ -294,5 +296,79 @@ func TestAcquireHonoursContext(t *testing.T) {
 	}
 	if _, _, active, _ := a.Snapshot(); active != 0 {
 		t.Fatalf("lease leaked: active %d", active)
+	}
+}
+
+type fakeIssuer struct {
+	mu   sync.Mutex
+	gens []uint64
+	err  error
+}
+
+func (f *fakeIssuer) Issue(_ context.Context, w workload.Spec, gen uint64) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gens = append(f.gens, gen)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return map[string]string{w.BootCredentials.Env.SessionToken: fmt.Sprintf("tok-%d", gen)}, nil
+}
+
+func credSpec() workload.Spec {
+	s := spec()
+	s.BootCredentials = &workload.AWSRole{RoleARN: "arn:aws:iam::1:role/g", Region: "r", SessionTags: map[string]string{"t": "v"},
+		Env: workload.AWSRoleEnv{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"}}
+	return s
+}
+
+func newCredAct(t *testing.T, l guest.Launcher, iss bootcred.Issuer) *Activator {
+	t.Helper()
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opt := Options{
+		Tick: 10 * time.Millisecond, StopGrace: 10 * time.Millisecond, Attempts: 1,
+		Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+		Ready:  func(context.Context, string) error { return nil },
+	}
+	if iss != nil {
+		opt.Credentials = iss
+	}
+	return New(credSpec(), j, l, nil, opt)
+}
+
+func TestEachBootGetsItsOwnCredentials(t *testing.T) {
+	l := &fakeLauncher{}
+	iss := &fakeIssuer{}
+	a := newCredAct(t, l, iss)
+	run(t, a)
+	for i := 0; i < 2; i++ {
+		_, release, err := a.Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		waitFor(t, "idle stop", func() bool { s, _, _, _ := a.Snapshot(); return s == Asleep })
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.envs) != 2 || l.envs[0]["ST"] != "tok-1" || l.envs[1]["ST"] != "tok-2" || iss.gens[1] != l.boots[1] {
+		t.Fatalf("boots %v issued %v envs %v", l.boots, iss.gens, l.envs)
+	}
+}
+
+func TestBootFailsClosedWithoutCredentials(t *testing.T) {
+	for name, iss := range map[string]bootcred.Issuer{"no issuer": nil, "denied": &fakeIssuer{err: errors.New("AccessDenied")}} {
+		l := &fakeLauncher{}
+		a := newCredAct(t, l, iss)
+		run(t, a)
+		if _, _, err := a.Acquire(context.Background()); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if l.count() != 0 {
+			t.Fatalf("%s: guest booted without credentials", name)
+		}
 	}
 }

@@ -50,3 +50,38 @@ func TestLoadRefuses(t *testing.T) {
 		}
 	}
 }
+
+const creds = `"boot_credentials":{"role_arn":"arn:aws:iam::123456789012:role/guest","region":"us-west-1",
+  "session_tags":{"replica":"inst/inst-1"},"duration":"15m",
+  "env":{"access_key_id":"AK","secret_access_key":"SK","session_token":"ST"}},`
+
+func TestBootCredentials(t *testing.T) {
+	withCreds := strings.Replace(good, `"boot_env":{`, creds+`"boot_env":{`, 1)
+	c, err := Load(write(t, withCreds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Workloads[0].BootCredentials; r == nil || r.SessionTags["replica"] != "inst/inst-1" || r.Env.SessionToken != "ST" {
+		t.Fatalf("boot_credentials = %+v", r)
+	}
+	for name, s := range map[string]string{
+		"no tags":       strings.Replace(withCreds, `{"replica":"inst/inst-1"}`, `{}`, 1),
+		"bad tag":       strings.Replace(withCreds, `"inst/inst-1"`, `"inst#1"`, 1),
+		"not a role":    strings.Replace(withCreds, `:role/guest`, `:user/guest`, 1),
+		"no region":     strings.Replace(withCreds, `"region":"us-west-1",`, ``, 1),
+		"short":         strings.Replace(withCreds, `"15m"`, `"5m"`, 1),
+		"long":          strings.Replace(withCreds, `"15m"`, `"2h"`, 1),
+		"dup env key":   strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"AK"`, 1),
+		"env collision": strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"K"`, 1),
+		"gen collision": strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"ZATI_REPLICA_GENERATION"`, 1),
+		"unknown field": strings.Replace(withCreds, `"region":"us-west-1",`, `"region":"us-west-1","policy":"*",`, 1),
+	} {
+		if _, err := Load(write(t, s)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	ca := strings.Replace(good, `"bucket":"b"}`, `"bucket":"b","ca_file":"/etc/zati/ca.pem"}`, 1)
+	if c, err := Load(write(t, ca)); err != nil || c.WakeHints.CAFile != "/etc/zati/ca.pem" {
+		t.Fatalf("ca_file: %v %+v", err, c.WakeHints)
+	}
+}
