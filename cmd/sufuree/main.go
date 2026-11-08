@@ -105,10 +105,15 @@ func run(args []string) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(cfg.Workloads))
 	for _, w := range cfg.Workloads {
-		if n, err := launcher.Reap(w.ID); err != nil {
+		n, unreadable, err := launcher.Reap(w.ID)
+		if err != nil {
 			return fmt.Errorf("workload %s: reaping leftover guests: %w", w.ID, err)
-		} else if n > 0 {
+		}
+		if n > 0 {
 			log.Warn("stopped guests left running by an earlier agent", "workload", w.ID, "count", n)
+		}
+		if unreadable > 0 {
+			log.Warn("some processes could not be checked for a leftover guest", "workload", w.ID, "unreadable", unreadable)
 		}
 		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
 		gw := &gateway.Gateway{

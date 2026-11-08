@@ -112,7 +112,13 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	go func() { <-ctx.Done(); _ = g.l.Close(); g.closeAll() }()
 	for {
 		c, err := g.l.Accept()
+		var ne net.Error
+		if err != nil && ctx.Err() == nil && errors.As(err, &ne) && ne.Timeout() {
+			time.Sleep(100 * time.Millisecond) // transient (such as EMFILE); retry
+			continue
+		}
 		if err != nil {
+			g.closeAll() // otherwise wg.Wait could block on idle clients
 			g.wg.Wait()
 			_ = os.Remove(g.SocketPath)
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {

@@ -96,7 +96,7 @@ and a generation. A boot fails rather than start without them. They are for
 start-up and are not refreshed, so a guest must not depend on them after
 `duration`. `wake_hints`
 takes a `ca_file` for a store with a private CA.
-One agent holds each `data_dir` (an exclusive lock). Each guest's boot volume
+One agent holds each `data_dir` (an exclusive `flock`, so `data_dir` must be on a local filesystem, not NFS). Each guest's boot volume
 is deleted when it exits, and at startup the agent stops any guest an earlier
 agent left running, found by its state volume on the QEMU command line. A busy hint wakes a
 sleeping workload once per hint generation, and an unreadable hint defers an
