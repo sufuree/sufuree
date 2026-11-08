@@ -213,39 +213,54 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 // it) and deletes its boot volume. It finds them by command line: a QEMU
 // process whose drive option names this workload's absolute state volume.
 // The caller must hold the host lock, so no live agent owns them.
-func (q *QEMU) Reap(id string) (int, error) {
+//
+// It also reports how many processes' command lines could not be read; a
+// leftover guest could be among them. Processes hidden from the agent
+// entirely (/proc mounted hidepid=2) cannot be counted.
+func (q *QEMU) Reap(id string) (reaped, unreadable int, err error) {
 	boot := filepath.Join(q.DataDir, "volumes", id+".boot.raw")
 	defer func() { _ = os.Remove(boot) }()
 	state, err := filepath.Abs(filepath.Join(q.DataDir, "volumes", id+".state.raw"))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	procs, err := listProcesses()
+	procs, unreadable, err := listProcesses()
 	if err != nil {
-		return 0, fmt.Errorf("listing processes: %w", err)
+		return 0, 0, fmt.Errorf("listing processes: %w", err)
 	}
 	var pids []int
 	for pid, cmdline := range procs {
-		if pid != os.Getpid() && strings.Contains(cmdline, "file="+state+",") {
+		if pid != os.Getpid() && isQEMU(cmdline) && strings.Contains(cmdline, "file="+state+",") {
 			pids = append(pids, pid)
 		}
 	}
 	for _, pid := range pids {
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return 0, err
+			return 0, unreadable, err
 		}
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for _, pid := range pids {
 		for syscall.Kill(pid, 0) == nil {
 			if time.Now().After(deadline) {
-				return len(pids), fmt.Errorf("guest pid %d did not exit", pid)
+				return len(pids), unreadable, fmt.Errorf("guest pid %d did not exit", pid)
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	return len(pids), nil
+	return len(pids), unreadable, nil
 }
+
+// isQEMU reports whether a command line runs a QEMU system emulator (or the
+// test stand-in), so an operator's grep naming the path is never killed.
+func isQEMU(cmdline string) bool {
+	exe, _, _ := strings.Cut(cmdline, " ")
+	base := filepath.Base(exe)
+	return strings.HasPrefix(base, "qemu-system-") || base == reapTestExe
+}
+
+// reapTestExe lets tests stand in for QEMU; empty in production.
+var reapTestExe = ""
 
 type qemuGuest struct {
 	cmd    *exec.Cmd
@@ -279,12 +294,13 @@ func (g *qemuGuest) Stop(grace time.Duration) error {
 // listProcesses returns every process's command line by pid. On Linux it
 // reads /proc (no dependency on a ps that may lack -ww, such as BusyBox's);
 // elsewhere it runs ps.
-func listProcesses() (map[int]string, error) {
+func listProcesses() (map[int]string, int, error) {
 	out := map[int]string{}
+	unreadable := 0
 	if runtime.GOOS == "linux" {
 		entries, err := os.ReadDir("/proc")
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, e := range entries {
 			pid, err := strconv.Atoi(e.Name())
@@ -292,16 +308,20 @@ func listProcesses() (map[int]string, error) {
 				continue
 			}
 			b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
-			if err != nil {
-				continue // exited, or not ours to read
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				continue // exited
+			case err != nil:
+				unreadable++ // not ours to read
+				continue
 			}
 			out[pid] = strings.ReplaceAll(string(b), "\x00", " ")
 		}
-		return out, nil
+		return out, unreadable, nil
 	}
 	raw, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		f := strings.Fields(line)
@@ -312,7 +332,7 @@ func listProcesses() (map[int]string, error) {
 			out[pid] = strings.Join(f[1:], " ")
 		}
 	}
-	return out, nil
+	return out, 0, nil
 }
 
 func freePort() (int, error) {

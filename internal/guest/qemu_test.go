@@ -36,7 +36,15 @@ func TestReapStopsOnlyOurLeftoverGuests(t *testing.T) {
 	exited := make(chan struct{})
 	go func() { _, _ = ours.Process.Wait(); close(exited) }()
 
-	n, err := q.Reap("w1")
+	reapTestExe = "sh" // the stand-in for qemu-system-*
+	t.Cleanup(func() { reapTestExe = "" })
+	// A non-QEMU process naming the path (an operator's command) is left alone.
+	bystander := exec.Command("awk", `BEGIN { system("sleep 30") }`, "file="+filepath.Join(vol, "w1.state.raw")+",format=raw")
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bystander.Process.Kill(); _ = bystander.Wait() })
+	n, _, err := q.Reap("w1")
 	if err != nil || n != 1 {
 		t.Fatalf("reaped %d, err %v; want 1", n, err)
 	}
@@ -48,10 +56,13 @@ func TestReapStopsOnlyOurLeftoverGuests(t *testing.T) {
 	if err := other.Process.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("another workload's guest was killed: %v", err)
 	}
+	if err := bystander.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("a non-QEMU process naming the path was killed: %v", err)
+	}
 	if _, err := os.Stat(boot); !os.IsNotExist(err) {
 		t.Fatal("boot volume left behind")
 	}
-	if n, err := q.Reap("w1"); err != nil || n != 0 {
+	if n, _, err := q.Reap("w1"); err != nil || n != 0 {
 		t.Fatalf("second reap: %d %v", n, err)
 	}
 }
