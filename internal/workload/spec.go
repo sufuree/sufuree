@@ -53,6 +53,10 @@ type Spec struct {
 	BootEnvFile      string            `json:"boot_env_file"`
 	BootEnv          map[string]string `json:"boot_env"`
 	GenerationEnvKey string            `json:"generation_env_key"`
+	// BootFiles are extra files on the boot volume (name -> content), for
+	// material a workload reads from a file, such as a key. Values use the
+	// same "env:NAME" indirection as BootEnv.
+	BootFiles map[string]string `json:"boot_files,omitempty"`
 	// HintPrefix is the object-store prefix the guest publishes
 	// <prefix>/wake.json under.
 	HintPrefix string `json:"hint_prefix,omitempty"`
@@ -142,12 +146,17 @@ func (w Spec) validate() error {
 		return bad("guest_port is out of range")
 	case w.StateMiB < 16:
 		return bad("state_mib must be at least 16")
-	case w.BootEnvFile == "" || strings.ContainsAny(w.BootEnvFile, "/\\") || strings.HasPrefix(w.BootEnvFile, "."):
+	case !plainName(w.BootEnvFile):
 		return bad("boot_env_file must be a plain file name")
 	case w.GenerationEnvKey == "":
 		return bad("generation_env_key is required")
 	case w.IdleTimeout.Duration <= 0, w.StartupTimeout.Duration <= 0:
 		return bad("idle_timeout and startup_timeout must be positive")
+	}
+	for name := range w.BootFiles {
+		if !plainName(name) || name == w.BootEnvFile {
+			return bad("boot_files names must be plain file names other than boot_env_file")
+		}
 	}
 	for k, v := range w.BootEnv {
 		if k == "" || strings.ContainsAny(k, "=\n") || strings.Contains(v, "\n") {
@@ -157,19 +166,45 @@ func (w Spec) validate() error {
 	return nil
 }
 
+func plainName(s string) bool {
+	return s != "" && !strings.ContainsAny(s, "/\\") && !strings.HasPrefix(s, ".")
+}
+
+func (w Spec) resolve(field, v string, getenv func(string) (string, bool)) (string, error) {
+	name, ok := strings.CutPrefix(v, "env:")
+	if !ok {
+		return v, nil
+	}
+	val, ok := getenv(name)
+	if !ok {
+		return "", fmt.Errorf("workload %q: %s needs %s in the agent environment", w.ID, field, name)
+	}
+	return val, nil
+}
+
+// ResolveBootFiles returns the boot files with "env:NAME" values resolved.
+func (w Spec) ResolveBootFiles(getenv func(string) (string, bool)) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(w.BootFiles))
+	for name, v := range w.BootFiles {
+		val, err := w.resolve("boot_files "+name, v, getenv)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = []byte(val)
+	}
+	return out, nil
+}
+
 // ResolveBootEnv returns the boot env with "env:NAME" values read from the
 // agent's environment and the generation key set.
 func (w Spec) ResolveBootEnv(generation uint64, getenv func(string) (string, bool)) (map[string]string, error) {
 	out := make(map[string]string, len(w.BootEnv)+1)
 	for k, v := range w.BootEnv {
-		if name, ok := strings.CutPrefix(v, "env:"); ok {
-			val, ok := getenv(name)
-			if !ok {
-				return nil, fmt.Errorf("workload %q: boot_env %s needs %s in the agent environment", w.ID, k, name)
-			}
-			v = val
+		val, err := w.resolve("boot_env "+k, v, getenv)
+		if err != nil {
+			return nil, err
 		}
-		out[k] = v
+		out[k] = val
 	}
 	out[w.GenerationEnvKey] = fmt.Sprint(generation)
 	return out, nil

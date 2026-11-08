@@ -42,6 +42,7 @@ func TestLoadRefuses(t *testing.T) {
 		"bad version":   strings.Replace(good, `"version":1`, `"version":2`, 1),
 		"bad id":        strings.Replace(good, `"inst-1"`, `"Inst/1"`, 1),
 		"path env file": strings.Replace(good, `"zati.env"`, `"../zati.env"`, 1),
+		"bad boot file": strings.Replace(good, `"boot_env":{`, `"boot_files":{"zati.env":"x"},"boot_env":{`, 1),
 		"no hints":      strings.Replace(good, `"wake_hints":{"endpoint":"http://127.0.0.1:8333","bucket":"b"},`, ``, 1),
 	} {
 		if _, err := Load(write(t, s)); err == nil {
