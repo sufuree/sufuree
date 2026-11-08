@@ -76,9 +76,10 @@ func (q *QEMU) opsHome() string {
 // createVolume builds a TFS volume labelled label from srcDir and moves it
 // to dst. Ops registers volumes by name in a shared directory (the user's
 // Ops store, which other tools also use), so a leftover volume with the
-// same label is moved out of the way first. It is moved into the agent's
-// private quarantine directory, not deleted: it may be an interrupted boot
-// volume holding secrets, or another tool's volume. Nothing empties the
+// same label is moved out of the way first. The Ops store must belong to
+// the agent alone (a dedicated user); a leftover is then an interrupted
+// create, possibly a boot volume holding secrets, so it is moved into the
+// agent's private quarantine directory rather than left in the store. Nothing empties the
 // quarantine (0700); an operator reviews and removes its contents.
 func (q *QEMU) createVolume(ctx context.Context, label, srcDir string, sizeMiB int, dst string) error {
 	q.volMu.Lock()
