@@ -79,20 +79,25 @@ type Activator struct {
 	opt      Options
 	log      *slog.Logger
 
-	mu          sync.Mutex
-	state       State
-	transition  chan struct{} // closed when the current waking/stopping ends
-	wakeErr     error
-	guest       guest.Guest
-	generation  uint64
-	active      int
-	lastActive  time.Time
-	awakeSince  time.Time
-	lastHintAt  time.Time
-	closed      bool   // shutting down: no new leases or wakes
-	busyWoke    bool   // a busy hint has caused a wake
-	busyWokeGen uint64 // the hint generation of that wake
-	hintErrs    int    // consecutive unreadable hints at idle stop
+	mu         sync.Mutex
+	state      State
+	transition chan struct{} // closed when the current waking/stopping ends
+	wakeErr    error
+	guest      guest.Guest
+	generation uint64
+	active     int
+	lastActive time.Time
+	awakeSince time.Time
+	lastHintAt time.Time
+	closed     bool // shutting down: no new leases or wakes
+	// A hint wakes a sleeping workload once per trigger (a busy hint's
+	// generation, or a next_due instant), so a guest that never updates
+	// its hint is not woken, idle-stopped and woken again forever. A
+	// failed wake clears these so the next poll retries.
+	wokeBusy    bool
+	wokeBusyGen uint64
+	wokeDue     time.Time
+	hintErrs    int // consecutive unreadable hints at idle stop
 	stats       Stats
 	stopControl chan struct{}
 	done        chan struct{}
@@ -200,6 +205,7 @@ func (a *Activator) dropLease() {
 func (a *Activator) beginWake(scheduled bool) {
 	a.state = Waking
 	a.wakeErr = nil
+	a.hintErrs = 0
 	a.transition = make(chan struct{})
 	a.stats.Wakes++
 	if scheduled {
@@ -231,6 +237,7 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 	a.mu.Lock()
 	a.state = Asleep
 	a.wakeErr = fmt.Errorf("%w: %v", ErrUnavailable, lastErr)
+	a.wokeBusy, a.wokeDue = false, time.Time{} // let the next hint poll retry
 	close(done)
 	a.mu.Unlock()
 }
@@ -376,15 +383,15 @@ func (a *Activator) tick(ctx context.Context) {
 		if err != nil || !ok {
 			return
 		}
-		scheduled := h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration))
 		a.mu.Lock()
-		// A busy hint wakes the workload once per hint generation: a boot
-		// that never republishes would otherwise be woken, idle-stopped and
-		// woken again by the same stale hint.
-		busyWake := h.Busy && (!a.busyWoke || h.Generation > a.busyWokeGen)
-		if (scheduled || busyWake) && a.state == Asleep && !a.closed {
-			if h.Busy {
-				a.busyWoke, a.busyWokeGen = true, h.Generation
+		dueWake := h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration)) && !h.NextDue.Equal(a.wokeDue)
+		busyWake := h.Busy && (!a.wokeBusy || h.Generation > a.wokeBusyGen)
+		if (dueWake || busyWake) && a.state == Asleep && !a.closed {
+			if busyWake {
+				a.wokeBusy, a.wokeBusyGen = true, h.Generation
+			}
+			if dueWake {
+				a.wokeDue = *h.NextDue
 			}
 			a.log.Info("scheduled wake", "busy", h.Busy, "hint_generation", h.Generation, "next_due", h.NextDue)
 			a.beginWake(true)

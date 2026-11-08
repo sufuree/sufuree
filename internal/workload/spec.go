@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -148,6 +149,9 @@ func (c HostConfig) Validate() error {
 	}
 	if c.DataDir == "" || c.SocketDir == "" {
 		return errors.New("host config: data_dir and socket_dir are required")
+	}
+	if !filepath.IsAbs(c.DataDir) || !filepath.IsAbs(c.SocketDir) {
+		return errors.New("host config: data_dir and socket_dir must be absolute paths")
 	}
 	if strings.Contains(c.DataDir, ",") {
 		return errors.New("host config: data_dir must not contain a comma (QEMU option syntax)")

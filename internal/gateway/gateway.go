@@ -39,13 +39,17 @@ type Gateway struct {
 // replaced, anything else at the path refused.
 func (g *Gateway) Listen() error {
 	dir := filepath.Dir(g.SocketPath)
+	_, statErr := os.Stat(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// The socket is created under the process umask and narrowed after;
-	// a 0700 directory keeps others out in between.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
+	// The socket is created under the process umask and narrowed after. A
+	// directory the agent creates is 0700 (umask aside), which keeps others
+	// out in between; an existing directory is left as it is.
+	if errors.Is(statErr, os.ErrNotExist) {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	if fi, err := os.Lstat(g.SocketPath); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {

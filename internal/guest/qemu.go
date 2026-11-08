@@ -73,17 +73,25 @@ func (q *QEMU) opsHome() string {
 }
 
 // createVolume builds a TFS volume labelled label from srcDir and moves it
-// to dst. Ops registers volumes by name in a shared directory, so any
-// leftover volume with the same label (from an interrupted create, possibly
-// holding boot secrets) is deleted first.
+// to dst. Ops registers volumes by name in a shared directory (the user's
+// Ops store, which other tools also use), so a leftover volume with the
+// same label is moved out of the way first. It is moved into the agent's
+// private quarantine directory, not deleted: it may be an interrupted boot
+// volume holding secrets, or another tool's volume.
 func (q *QEMU) createVolume(ctx context.Context, label, srcDir string, sizeMiB int, dst string) error {
 	q.volMu.Lock()
 	defer q.volMu.Unlock()
 	vdir := filepath.Join(q.opsHome(), "volumes")
 	old, _ := filepath.Glob(filepath.Join(vdir, label+":*.raw"))
-	for _, f := range old {
-		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if len(old) > 0 {
+		quarantine := filepath.Join(q.DataDir, "volumes.quarantine")
+		if err := os.MkdirAll(quarantine, 0o700); err != nil {
 			return err
+		}
+		for _, f := range old {
+			if err := os.Rename(f, filepath.Join(quarantine, filepath.Base(f))); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("leftover ops volume %s blocks volume creation: %w", filepath.Base(f), err)
+			}
 		}
 	}
 	cmd := exec.CommandContext(ctx, q.bin(q.OpsBin, "ops"), "volume", "create", label, "-d", srcDir, "-s", fmt.Sprintf("%dm", sizeMiB))
@@ -158,6 +166,7 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 	}
 	port, err := freePort()
 	if err != nil {
+		_ = os.Remove(boot)
 		return nil, err
 	}
 	serial := filepath.Join(logs, fmt.Sprintf("%s.%d.log", w.ID, generation))
@@ -227,10 +236,19 @@ func (q *QEMU) Reap(id string) (bool, error) {
 	if err != nil || pid <= 1 {
 		return false, os.Remove(pidfile)
 	}
-	state := filepath.Join(q.DataDir, "volumes", id+".state.raw")
+	state, err := filepath.Abs(filepath.Join(q.DataDir, "volumes", id+".state.raw"))
+	if err != nil {
+		return false, err
+	}
 	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil || !strings.Contains(string(out), state) {
-		return false, os.Remove(pidfile) // gone, or no longer ours
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit):
+		return false, os.Remove(pidfile) // no such process
+	case err != nil:
+		return false, fmt.Errorf("checking pid %d: %w", pid, err)
+	case !strings.Contains(string(out), "file="+state+","):
+		return false, os.Remove(pidfile) // the pid now belongs to another process
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return false, err

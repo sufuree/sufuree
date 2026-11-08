@@ -433,3 +433,41 @@ func TestUnreadableHintDefersIdleStopBoundedly(t *testing.T) {
 		t.Fatalf("vetoes = %d, want %d", s.BusyVetoes, maxHintErrors)
 	}
 }
+
+func TestFailedHintWakeIsRetried(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{}
+	// Both attempts of the first wake (generations 1 and 2) never become
+	// ready; later boots do.
+	a, _ := newAct(t, l, h, func(_ context.Context, addr string) error {
+		if addr == "guest-1" || addr == "guest-2" {
+			return errors.New("not ready")
+		}
+		return nil
+	})
+	h.set(wakehint.Hint{Version: 1, Generation: 3, Busy: true})
+	run(t, a)
+	waitFor(t, "a retried wake after the first one failed", func() bool {
+		st, _, _, s := a.Snapshot()
+		return s.FailedBoots >= 2 && (st == Awake || s.IdleStops > 0)
+	})
+}
+
+func TestStaleNextDueWakesOnce(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{}
+	a, _ := newAct(t, l, h, nil)
+	past := time.Now().Add(-time.Minute)
+	// The woken guest never moves next_due forward.
+	h.set(wakehint.Hint{Version: 1, Generation: 1, NextDue: &past})
+	run(t, a)
+	waitFor(t, "one wake for the due work", func() bool { return l.count() == 1 })
+	waitFor(t, "idle stop", func() bool { _, _, _, s := a.Snapshot(); return s.IdleStops == 1 })
+	time.Sleep(300 * time.Millisecond)
+	if l.count() != 1 {
+		t.Fatalf("a stale next_due woke the workload %d times", l.count())
+	}
+	next := time.Now().Add(-time.Second)
+	h.set(wakehint.Hint{Version: 1, Generation: 1, NextDue: &next})
+	waitFor(t, "wake for a new next_due", func() bool { return l.count() == 2 })
+}
