@@ -1,36 +1,25 @@
-// Command sufuree runs the single-host slice of the Sufuree host agent:
+// Command sufuree is the Sufuree CLI.
 //
 //	sufuree host --config host.json
+//	sufuree controller --data-dir DIR --listen ADDR [--executor memory] [--deployment ID]
+//	                    [--raft-bind ADDR --raft-id ID] [--raft-bootstrap]
+//	                    [--edge-listen ADDR]
+//	sufuree app apply --file spec.json --controller URL
+//	sufuree app get NAME --controller URL
+//	sufuree version
 //
-// For each admitted workload it serves a 0600 Unix socket, wakes the guest
-// on demand, stops it when idle, and wakes it for scheduled work announced
-// in the workload's published hint.
+// host runs one host agent. controller reconciles desired resources and may
+// serve an HTTP edge. version prints the RFC-0001 implementation revision.
+// None of these commands is a qualified cloud deployment.
 package main
 
 import (
-	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"sync"
-	"syscall"
-	"time"
-
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-
-	"github.com/sufuree/sufuree/internal/activator"
-	"github.com/sufuree/sufuree/internal/bootcred"
-	"github.com/sufuree/sufuree/internal/gateway"
-	"github.com/sufuree/sufuree/internal/guest"
-	"github.com/sufuree/sufuree/internal/journal"
-	"github.com/sufuree/sufuree/internal/wakehint"
-	"github.com/sufuree/sufuree/internal/workload"
 )
+
+const version = "0.1.0-rfc0001"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -40,121 +29,20 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || args[0] != "host" {
-		return errors.New("usage: sufuree host --config <host.json> [--hint-poll 15s] [--tick 1s]")
+	if len(args) == 0 {
+		return errors.New("usage: sufuree <host|controller|app|version>")
 	}
-	fs := flag.NewFlagSet("host", flag.ContinueOnError)
-	cfgPath := fs.String("config", "", "host config file")
-	hintPoll := fs.Duration("hint-poll", 15*time.Second, "how often a sleeping workload's hint is read")
-	tick := fs.Duration("tick", time.Second, "control loop period")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
+	switch args[0] {
+	case "host":
+		return runHost(args[1:])
+	case "controller":
+		return runController(args[1:])
+	case "app":
+		return runApp(args[1:])
+	case "version":
+		fmt.Fprintln(os.Stdout, version)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
 	}
-	if *cfgPath == "" {
-		return errors.New("--config is required")
-	}
-	cfg, err := workload.Load(*cfgPath)
-	if err != nil {
-		return err
-	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-
-	// One agent per data_dir: a second would steal sockets, race the
-	// journal and reap the first one's guests.
-	unlock, err := lockHost(cfg.DataDir)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	j, err := journal.Open(filepath.Join(cfg.DataDir, "journal"))
-	if err != nil {
-		return err
-	}
-	var hints wakehint.Reader
-	if cfg.WakeHints != nil {
-		ak, ok1 := os.LookupEnv("SUFUREE_HINT_ACCESS_KEY")
-		sk, ok2 := os.LookupEnv("SUFUREE_HINT_SECRET_KEY")
-		if !ok1 || !ok2 {
-			return errors.New("wake_hints needs SUFUREE_HINT_ACCESS_KEY and SUFUREE_HINT_SECRET_KEY")
-		}
-		var ca []byte
-		if f := cfg.WakeHints.CAFile; f != "" {
-			if ca, err = os.ReadFile(f); err != nil {
-				return fmt.Errorf("wake_hints.ca_file: %w", err)
-			}
-		}
-		if hints, err = wakehint.NewS3(cfg.WakeHints.Endpoint, cfg.WakeHints.Region, cfg.WakeHints.Bucket, ak, sk, ca); err != nil {
-			return err
-		}
-	}
-	// Per-boot credentials are issued with the agent's own AWS credentials
-	// (the default chain, such as the instance profile).
-	issuer := &bootcred.STS{NewClient: func(region string) (bootcred.AssumeRoler, error) {
-		c, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region))
-		if err != nil {
-			return nil, err
-		}
-		return sts.NewFromConfig(c), nil
-	}}
-	launcher := &guest.QEMU{DataDir: cfg.DataDir}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	var wg sync.WaitGroup
-	errs := make(chan error, len(cfg.Workloads))
-	for _, w := range cfg.Workloads {
-		n, unreadable, err := launcher.Reap(w.ID)
-		if err != nil {
-			return fmt.Errorf("workload %s: reaping leftover guests: %w", w.ID, err)
-		}
-		if n > 0 {
-			log.Warn("stopped guests left running by an earlier agent", "workload", w.ID, "count", n)
-		}
-		if unreadable > 0 {
-			log.Warn("some processes could not be checked for a leftover guest", "workload", w.ID, "unreadable", unreadable)
-		}
-		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
-		gw := &gateway.Gateway{
-			ID: w.ID, SocketPath: filepath.Join(cfg.SocketDir, w.ID+".sock"), Act: act,
-			WakeTimeout: activator.WakeBudget(w, 0) + 10*time.Second, Logger: log,
-		}
-		if err := gw.Listen(); err != nil {
-			stop()
-			wg.Wait()
-			return fmt.Errorf("workload %s: %w", w.ID, err)
-		}
-		log.Info("serving", "workload", w.ID, "socket", gw.SocketPath)
-		wg.Add(2)
-		go func() { defer wg.Done(); act.Run(ctx) }()
-		go func() {
-			defer wg.Done()
-			if err := gw.Serve(ctx); err != nil {
-				errs <- fmt.Errorf("workload %s gateway: %w", w.ID, err)
-				stop()
-			}
-		}()
-	}
-	<-ctx.Done()
-	wg.Wait()
-	close(errs)
-	return <-errs
-}
-
-// lockHost takes an exclusive, non-blocking lock on <dataDir>/agent.lock
-// for the life of the process.
-func lockHost(dataDir string) (func(), error) {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(filepath.Join(dataDir, "agent.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("another sufuree agent holds %s: %w", dataDir, err)
-	}
-	return func() { _ = f.Close() }, nil
 }
