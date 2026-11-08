@@ -480,3 +480,14 @@ func TestHintBackoffDoublesToACap(t *testing.T) {
 		}
 	}
 }
+
+func TestWakeBudgetCoversCredentialIssue(t *testing.T) {
+	s := spec()
+	if got := WakeBudget(s, 0); got != 2*s.StartupTimeout.Duration {
+		t.Fatalf("without credentials: %s", got)
+	}
+	s = credSpec()
+	if got, want := WakeBudget(s, 3), 3*(s.StartupTimeout.Duration+CredentialIssueTimeout); got != want {
+		t.Fatalf("with credentials: %s, want %s", got, want)
+	}
+}

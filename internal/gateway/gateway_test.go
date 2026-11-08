@@ -127,3 +127,46 @@ func TestListenRefusesNonSocket(t *testing.T) {
 		t.Fatal("listened over a regular file")
 	}
 }
+
+func TestShutdownEndsHeldConnections(t *testing.T) {
+	// An upstream that accepts and never answers, like an idle guest.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = c.Close() }()
+		}
+	}()
+	act := &fakeAct{addr: l.Addr().String()}
+	g := &Gateway{ID: "w", SocketPath: shortSock(t), Act: act, WakeTimeout: time.Second, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := g.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = g.Serve(ctx); close(done) }()
+	c, err := net.Dial("unix", g.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	for act.active.Load() != 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return while a client held a connection open")
+	}
+	if act.active.Load() != 0 {
+		t.Fatal("lease not released at shutdown")
+	}
+}

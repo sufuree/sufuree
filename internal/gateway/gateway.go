@@ -33,6 +33,41 @@ type Gateway struct {
 
 	l  net.Listener
 	wg sync.WaitGroup
+
+	mu    sync.Mutex
+	conns map[net.Conn]struct{} // client and guest connections in flight
+	done  bool
+}
+
+// track records c, or reports false once the gateway is shutting down.
+func (g *Gateway) track(c net.Conn) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.done {
+		return false
+	}
+	if g.conns == nil {
+		g.conns = map[net.Conn]struct{}{}
+	}
+	g.conns[c] = struct{}{}
+	return true
+}
+
+func (g *Gateway) untrack(c net.Conn) {
+	g.mu.Lock()
+	delete(g.conns, c)
+	g.mu.Unlock()
+}
+
+// closeAll ends every client connection, so Serve returns at shutdown even
+// while a client holds an idle connection open.
+func (g *Gateway) closeAll() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.done = true
+	for c := range g.conns {
+		_ = c.Close()
+	}
 }
 
 // Listen binds the socket: parent 0700, socket 0600, a stale socket file
@@ -74,7 +109,7 @@ func (g *Gateway) Listen() error {
 // Serve accepts until ctx ends, then closes the socket and waits for open
 // connections to finish.
 func (g *Gateway) Serve(ctx context.Context) error {
-	go func() { <-ctx.Done(); _ = g.l.Close() }()
+	go func() { <-ctx.Done(); _ = g.l.Close(); g.closeAll() }()
 	for {
 		c, err := g.l.Accept()
 		if err != nil {
@@ -85,9 +120,14 @@ func (g *Gateway) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+		if !g.track(c) {
+			_ = c.Close()
+			continue
+		}
 		g.wg.Add(1)
 		go func() {
 			defer g.wg.Done()
+			defer g.untrack(c)
 			g.handle(c)
 		}()
 	}
@@ -115,6 +155,12 @@ func (g *Gateway) handle(c net.Conn) {
 		return
 	}
 	defer func() { _ = up.Close() }()
+	// Shutdown closes the guest side too: a copy from an idle guest would
+	// otherwise block.
+	if !g.track(up) {
+		return
+	}
+	defer g.untrack(up)
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(up, c); closeWrite(up); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(c, up); closeWrite(c); done <- struct{}{} }()

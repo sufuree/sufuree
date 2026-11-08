@@ -124,7 +124,7 @@ func New(spec workload.Spec, j *journal.Journal, l guest.Launcher, hints wakehin
 		opt.StopGrace = 5 * time.Second
 	}
 	if opt.Attempts <= 0 {
-		opt.Attempts = 2
+		opt.Attempts = defaultAttempts
 	}
 	if opt.Getenv == nil {
 		opt.Getenv = os.LookupEnv
@@ -299,12 +299,32 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 	}
 }
 
+// CredentialIssueTimeout bounds issuing one boot's credentials.
+const CredentialIssueTimeout = 30 * time.Second
+
+// defaultAttempts is the boot attempts per wake when Options.Attempts is 0.
+const defaultAttempts = 2
+
+// WakeBudget is the longest a wake can take: every attempt's credential
+// issue (if any) and startup timeout. attempts 0 means the default. A caller
+// waiting on a wake (the gateway) must allow at least this.
+func WakeBudget(w workload.Spec, attempts int) time.Duration {
+	if attempts <= 0 {
+		attempts = defaultAttempts
+	}
+	per := w.StartupTimeout.Duration
+	if w.BootCredentials != nil {
+		per += CredentialIssueTimeout
+	}
+	return time.Duration(attempts) * per
+}
+
 // issueCredentials adds this generation's scoped credentials to env.
 func (a *Activator) issueCredentials(gen uint64, env map[string]string) error {
 	if a.opt.Credentials == nil {
 		return fmt.Errorf("workload %q has boot_credentials but the agent has no credential issuer", a.spec.ID)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), CredentialIssueTimeout)
 	defer cancel()
 	t0 := time.Now()
 	creds, err := a.opt.Credentials.Issue(ctx, a.spec, gen)

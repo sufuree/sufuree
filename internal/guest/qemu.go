@@ -198,70 +198,53 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 		_ = os.Remove(boot)
 		return nil, fmt.Errorf("qemu: %w", err)
 	}
-	// The pidfile lets a restarted agent stop a guest it lost track of.
-	pidfile := q.pidfile(w.ID)
-	if err := os.WriteFile(pidfile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(boot)
-		return nil, err
-	}
 	g := &qemuGuest{cmd: cmd, addr: fmt.Sprintf("127.0.0.1:%d", port), exited: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
 		// The boot volume holds this boot's env and secret files.
 		_ = os.Remove(boot)
-		_ = os.Remove(pidfile)
 		close(g.exited)
 	}()
 	return g, nil
 }
 
-func (q *QEMU) pidfile(id string) string { return filepath.Join(q.DataDir, "volumes", id+".pid") }
-
-// Reap stops a guest left running by an earlier agent (crash or kill) and
-// deletes its boot volume. It kills the recorded process only if its
-// command line still names this workload's state volume, so a reused pid
-// is left alone.
-func (q *QEMU) Reap(id string) (bool, error) {
-	pidfile := q.pidfile(id)
+// Reap stops every guest an earlier agent left running for workload id
+// (after a crash or kill, including one between starting QEMU and recording
+// it) and deletes its boot volume. It finds them by command line: a QEMU
+// process whose drive option names this workload's absolute state volume.
+// The caller must hold the host lock, so no live agent owns them.
+func (q *QEMU) Reap(id string) (int, error) {
 	boot := filepath.Join(q.DataDir, "volumes", id+".boot.raw")
 	defer func() { _ = os.Remove(boot) }()
-	raw, err := os.ReadFile(pidfile)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil || pid <= 1 {
-		return false, os.Remove(pidfile)
-	}
 	state, err := filepath.Abs(filepath.Join(q.DataDir, "volumes", id+".state.raw"))
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	cmdline, alive, err := processCommandLine(pid)
-	switch {
-	case err != nil:
-		return false, fmt.Errorf("checking pid %d: %w", pid, err)
-	case !alive:
-		return false, os.Remove(pidfile)
-	case !strings.Contains(cmdline, "file="+state+","):
-		return false, os.Remove(pidfile) // the pid now belongs to another process
+	procs, err := listProcesses()
+	if err != nil {
+		return 0, fmt.Errorf("listing processes: %w", err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return false, err
+	var pids []int
+	for pid, cmdline := range procs {
+		if pid != os.Getpid() && strings.Contains(cmdline, "file="+state+",") {
+			pids = append(pids, pid)
+		}
+	}
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return 0, err
+		}
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			return true, fmt.Errorf("guest pid %d did not exit", pid)
+	for _, pid := range pids {
+		for syscall.Kill(pid, 0) == nil {
+			if time.Now().After(deadline) {
+				return len(pids), fmt.Errorf("guest pid %d did not exit", pid)
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	return true, os.Remove(pidfile)
+	return len(pids), nil
 }
 
 type qemuGuest struct {
@@ -293,29 +276,43 @@ func (g *qemuGuest) Stop(grace time.Duration) error {
 	return nil
 }
 
-// processCommandLine returns pid's command line. On Linux it reads /proc
-// (no dependency on a ps that may lack -ww, such as BusyBox's); elsewhere it
-// runs ps, whose exit status 1 means no such process.
-func processCommandLine(pid int) (string, bool, error) {
+// listProcesses returns every process's command line by pid. On Linux it
+// reads /proc (no dependency on a ps that may lack -ww, such as BusyBox's);
+// elsewhere it runs ps.
+func listProcesses() (map[int]string, error) {
+	out := map[int]string{}
 	if runtime.GOOS == "linux" {
-		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		if errors.Is(err, os.ErrNotExist) {
-			return "", false, nil
-		}
+		entries, err := os.ReadDir("/proc")
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
-		return strings.ReplaceAll(string(b), "\x00", " "), true, nil
+		for _, e := range entries {
+			pid, err := strconv.Atoi(e.Name())
+			if err != nil {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+			if err != nil {
+				continue // exited, or not ours to read
+			}
+			out[pid] = strings.ReplaceAll(string(b), "\x00", " ")
+		}
+		return out, nil
 	}
-	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
-		return "", false, nil
-	}
+	raw, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	return string(out), true, nil
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		if pid, err := strconv.Atoi(f[0]); err == nil {
+			out[pid] = strings.Join(f[1:], " ")
+		}
+	}
+	return out, nil
 }
 
 func freePort() (int, error) {
