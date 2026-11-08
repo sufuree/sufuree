@@ -471,3 +471,12 @@ func TestStaleNextDueWakesOnce(t *testing.T) {
 	h.set(wakehint.Hint{Version: 1, Generation: 1, NextDue: &next})
 	waitFor(t, "wake for a new next_due", func() bool { return l.count() == 2 })
 }
+
+func TestHintBackoffDoublesToACap(t *testing.T) {
+	poll := 15 * time.Second
+	for n, want := range map[int]time.Duration{1: 15 * time.Second, 2: 30 * time.Second, 3: time.Minute, 5: 4 * time.Minute, 6: 5 * time.Minute, 50: 5 * time.Minute} {
+		if got := hintBackoff(n, poll); got != want {
+			t.Errorf("hintBackoff(%d) = %s, want %s", n, got, want)
+		}
+	}
+}

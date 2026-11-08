@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,7 +78,8 @@ func (q *QEMU) opsHome() string {
 // Ops store, which other tools also use), so a leftover volume with the
 // same label is moved out of the way first. It is moved into the agent's
 // private quarantine directory, not deleted: it may be an interrupted boot
-// volume holding secrets, or another tool's volume.
+// volume holding secrets, or another tool's volume. Nothing empties the
+// quarantine (0700); an operator reviews and removes its contents.
 func (q *QEMU) createVolume(ctx context.Context, label, srcDir string, sizeMiB int, dst string) error {
 	q.volMu.Lock()
 	defer q.volMu.Unlock()
@@ -240,14 +242,13 @@ func (q *QEMU) Reap(id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	var exit *exec.ExitError
+	cmdline, alive, err := processCommandLine(pid)
 	switch {
-	case errors.As(err, &exit):
-		return false, os.Remove(pidfile) // no such process
 	case err != nil:
 		return false, fmt.Errorf("checking pid %d: %w", pid, err)
-	case !strings.Contains(string(out), "file="+state+","):
+	case !alive:
+		return false, os.Remove(pidfile)
+	case !strings.Contains(cmdline, "file="+state+","):
 		return false, os.Remove(pidfile) // the pid now belongs to another process
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -290,6 +291,31 @@ func (g *qemuGuest) Stop(grace time.Duration) error {
 	_ = g.cmd.Process.Kill()
 	<-g.exited
 	return nil
+}
+
+// processCommandLine returns pid's command line. On Linux it reads /proc
+// (no dependency on a ps that may lack -ww, such as BusyBox's); elsewhere it
+// runs ps, whose exit status 1 means no such process.
+func processCommandLine(pid int) (string, bool, error) {
+	if runtime.GOOS == "linux" {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		return strings.ReplaceAll(string(b), "\x00", " "), true, nil
+	}
+	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
 }
 
 func freePort() (int, error) {
