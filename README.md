@@ -7,10 +7,11 @@ them, and release backend compute when it is no longer needed. The goal is to
 make keeping many idle applications and database instances affordable, using
 small isolated guests and demand-driven host autoscaling.
 
-**Status: accepted architecture, not yet implemented.** This repository currently
-contains the design RFCs. There is no runnable Sufuree CLI or runtime to install.
-Performance, durability, provider behavior and cost savings still require
-qualification.
+**Status: accepted architecture; first single-host slice in progress.** The
+`sufuree host` command runs one host's agent and per-workload gateway sockets for
+stateful unikernel workloads (see [Single-host slice](#single-host-slice)). There
+is no controller, placement, host autoscaling or release yet. Performance,
+durability, provider behavior and cost savings still require qualification.
 
 ## How it is designed to work
 
@@ -66,3 +67,27 @@ ownership enforcement, runtime compatibility and real cost measurements.
 ## License
 
 [Apache License 2.0](LICENSE).
+
+## Single-host slice
+
+`sufuree host --config host.json` admits stateful unikernel workloads on one
+KVM host. For each workload it:
+
+- serves a `0600` Unix socket at `<socket_dir>/<id>.sock`, holding an activity
+  lease per connection and answering `503` with `Retry-After` if activation fails;
+- wakes the guest once however many connections arrive, under a fresh lease
+  generation that is fsynced to the host journal before boot, and retries once
+  under a new generation if the guest is not ready within `startup_timeout`;
+- stops the guest after `idle_timeout` without connections (and at least
+  `min_awake` after a wake), unless the workload's published hint for the current
+  generation says it is busy;
+- while asleep, reads the workload's hint (`<hint_prefix>/wake.json` in an
+  S3-compatible store) and wakes it when it is busy or its `next_due` is within
+  `scheduled_lead`, so scheduled work runs without keeping the guest up.
+
+Each boot gets a fresh `boot` volume carrying `boot_env_file`, because a
+unikernel image's argv and environment are fixed at build time. `env:NAME`
+values are read from the agent's environment so secrets stay out of the config.
+Stopping is crash-consistent: workloads must acknowledge only writes that are
+already durable off-host. QEMU user networking is a slice simplification, not
+the production isolation boundary.
