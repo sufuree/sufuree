@@ -96,6 +96,10 @@ type Spec struct {
 	// HintPrefix is the object-store prefix the guest publishes
 	// <prefix>/wake.json under.
 	HintPrefix string `json:"hint_prefix,omitempty"`
+	// ProgressEnvKey, when set, receives the highest progress the hints
+	// have reported, as "<epoch>:<seq>", on every boot after the first
+	// report (see wakehint.Progress). Requires hint_prefix.
+	ProgressEnvKey string `json:"progress_env_key,omitempty"`
 
 	IdleTimeout    Duration `json:"idle_timeout"`
 	StartupTimeout Duration `json:"startup_timeout"`
@@ -196,6 +200,13 @@ func (w Spec) validate() error {
 		return bad("image path must not contain a comma (QEMU option syntax)")
 	case w.IdleTimeout.Duration <= 0, w.StartupTimeout.Duration <= 0:
 		return bad("idle_timeout and startup_timeout must be positive")
+	case w.ProgressEnvKey != "" && w.HintPrefix == "":
+		return bad("progress_env_key needs hint_prefix")
+	case strings.ContainsAny(w.ProgressEnvKey, "=\n\r"), w.ProgressEnvKey != "" && w.ProgressEnvKey == w.GenerationEnvKey:
+		return bad("progress_env_key must be a plain key other than generation_env_key")
+	}
+	if _, clash := w.BootEnv[w.ProgressEnvKey]; clash && w.ProgressEnvKey != "" {
+		return bad("progress_env_key must not also be in boot_env")
 	}
 	for name := range w.BootFiles {
 		if !plainName(name) || name == w.BootEnvFile {

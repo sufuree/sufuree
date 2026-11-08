@@ -491,3 +491,59 @@ func TestWakeBudgetCoversCredentialIssue(t *testing.T) {
 		t.Fatalf("with credentials: %s, want %s", got, want)
 	}
 }
+
+// TestBootCarriesTheHighestProgressSeen: the host hands each boot the
+// highest progress any hint reported, so a replayed (lower) hint or store
+// cannot lower it.
+func TestBootCarriesTheHighestProgressSeen(t *testing.T) {
+	l := &fakeLauncher{}
+	h := &fakeHints{}
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := spec()
+	w.ProgressEnvKey = "MIN"
+	a := New(w, j, l, h, Options{
+		Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond,
+		Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+		Ready:  func(context.Context, string) error { return nil },
+	})
+	run(t, a)
+	wake := func() map[string]string {
+		t.Helper()
+		_, release, err := a.Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		time.Sleep(w.IdleTimeout.Duration + 10*time.Millisecond)
+		a.stopIfStillIdle()
+		a.mu.Lock()
+		st := a.state
+		a.mu.Unlock()
+		if st != Asleep {
+			t.Fatalf("state after idle stop = %v", st)
+		}
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return l.envs[len(l.envs)-1]
+	}
+	if env := wake(); env["MIN"] != "" {
+		t.Fatalf("first boot got progress %q before any was reported", env["MIN"])
+	}
+	for _, c := range []struct {
+		p    *wakehint.Progress
+		want string
+	}{
+		{&wakehint.Progress{Epoch: 2, Seq: 10}, "2:10"},
+		{&wakehint.Progress{Epoch: 2, Seq: 5}, "2:10"}, // a replayed hint
+		{nil, "2:10"},
+		{&wakehint.Progress{Epoch: 3, Seq: 1}, "3:1"},
+	} {
+		h.set(wakehint.Hint{Version: 1, Progress: c.p})
+		if env := wake(); env["MIN"] != c.want {
+			t.Fatalf("hint progress %+v: boot got %q, want %q", c.p, env["MIN"], c.want)
+		}
+	}
+}

@@ -19,6 +19,10 @@ import (
 type Record struct {
 	Version    int    `json:"version"`
 	Generation uint64 `json:"generation"` // last generation issued
+	// The highest durable progress the workload reported (epoch, seq);
+	// zero until it reports one.
+	ProgressEpoch uint64 `json:"progress_epoch,omitempty"`
+	ProgressSeq   uint64 `json:"progress_seq,omitempty"`
 }
 
 // Journal stores records under dir, one file per workload.
@@ -78,6 +82,22 @@ func (j *Journal) NextGeneration(id string) (uint64, error) {
 		return 0, err
 	}
 	return r.Generation, nil
+}
+
+// AdvanceProgress durably records (epoch, seq) for id if it is above the
+// recorded progress, and reports whether it was.
+func (j *Journal) AdvanceProgress(id string, epoch, seq uint64) (bool, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	r, err := j.get(id)
+	if err != nil {
+		return false, err
+	}
+	if epoch < r.ProgressEpoch || (epoch == r.ProgressEpoch && seq <= r.ProgressSeq) {
+		return false, nil
+	}
+	r.ProgressEpoch, r.ProgressSeq = epoch, seq
+	return true, j.put(id, r)
 }
 
 // put writes atomically and durably: temp file, fsync, rename, dir fsync.
