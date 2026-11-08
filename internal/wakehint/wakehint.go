@@ -38,7 +38,9 @@ type Hint struct {
 }
 
 // Progress is a position a workload reports as durably committed, ordered
-// by Epoch then Seq; its meaning is the workload's. The host keeps the
+// by Epoch then Seq. Epoch must be a generation the host issued (such as
+// the generation whose data is committed); Seq is the workload's. The host
+// ignores progress naming a generation it never issued. It keeps the
 // highest it has seen and passes it to the next boot (progress_env_key), so
 // the workload can refuse its own store if that store was rolled back
 // behind it. The host cannot authenticate it: a forged higher value can
