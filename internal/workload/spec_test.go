@@ -91,6 +91,7 @@ func TestRefusesInjection(t *testing.T) {
 	for name, s := range map[string]string{
 		"comma in image":     strings.Replace(good, `"/i.img"`, `"/i.img,snapshot=off"`, 1),
 		"comma in data_dir":  strings.Replace(good, `"data_dir":"/d"`, `"data_dir":"/d,x"`, 1),
+		"relative data_dir":  strings.Replace(good, `"data_dir":"/d"`, `"data_dir":"d"`, 1),
 		"generation key '='": strings.Replace(good, `"ZATI_REPLICA_GENERATION"`, `"A=B"`, 1),
 		"long id with creds": strings.Replace(strings.Replace(withCreds, `"inst-1"`, `"`+strings.Repeat("a", 43)+`"`, 1), `"inst/inst-1","idle`, `"inst/x","idle`, 1),
 	} {
