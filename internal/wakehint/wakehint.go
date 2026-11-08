@@ -32,6 +32,25 @@ type Hint struct {
 	Busy       bool       `json:"busy"`
 	NextDue    *time.Time `json:"next_due,omitempty"`
 	UpdatedAt  time.Time  `json:"updated_at"`
+	// Progress, when present, is the workload's durable position (see
+	// Progress). Optional.
+	Progress *Progress `json:"progress,omitempty"`
+}
+
+// Progress is a position a workload reports as durably committed, ordered
+// by Epoch then Seq; its meaning is the workload's. The host keeps the
+// highest it has seen and passes it to the next boot (progress_env_key), so
+// the workload can refuse its own store if that store was rolled back
+// behind it. The host cannot authenticate it: a forged higher value can
+// stop the workload from booting, never make it accept less.
+type Progress struct {
+	Epoch uint64 `json:"epoch"`
+	Seq   uint64 `json:"seq"`
+}
+
+// Less orders positions by epoch, then sequence.
+func (p Progress) Less(q Progress) bool {
+	return p.Epoch < q.Epoch || (p.Epoch == q.Epoch && p.Seq < q.Seq)
 }
 
 // Reader fetches hints.

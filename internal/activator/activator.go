@@ -261,6 +261,9 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := a.progressEnv(env); err != nil {
+		return nil, 0, err
+	}
 	files, err := a.spec.ResolveBootFiles(a.opt.Getenv)
 	if err != nil {
 		return nil, 0, err
@@ -338,10 +341,64 @@ func (a *Activator) issueCredentials(gen uint64, env map[string]string) error {
 	return nil
 }
 
+// recordProgress reads the hint and durably keeps its progress if higher.
+func (a *Activator) recordProgress(ctx context.Context) error {
+	if a.hints == nil || a.spec.HintPrefix == "" {
+		return nil
+	}
+	h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
+	if err != nil || !ok {
+		return err
+	}
+	return a.noteProgress(h)
+}
+
+func (a *Activator) noteProgress(h wakehint.Hint) error {
+	if h.Progress == nil {
+		return nil
+	}
+	up, err := a.journal.AdvanceProgress(a.spec.ID, h.Progress.Epoch, h.Progress.Seq)
+	if up {
+		a.log.Debug("progress recorded", "epoch", h.Progress.Epoch, "seq", h.Progress.Seq)
+	}
+	return err
+}
+
+// progressEnv sets the progress key from a fresh hint read and the journal.
+// An unreadable hint does not block the wake: the journal still holds the
+// last progress seen.
+func (a *Activator) progressEnv(env map[string]string) error {
+	if a.spec.ProgressEnvKey == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := a.recordProgress(ctx)
+	cancel()
+	if err != nil {
+		a.log.Warn("hint unreadable before boot; using recorded progress", "err", err)
+	}
+	r, err := a.journal.Get(a.spec.ID)
+	if err != nil {
+		return err
+	}
+	if r.ProgressEpoch != 0 || r.ProgressSeq != 0 {
+		env[a.spec.ProgressEnvKey] = fmt.Sprintf("%d:%d", r.ProgressEpoch, r.ProgressSeq)
+	}
+	return nil
+}
+
 // watchExit returns the workload to Asleep if its guest ends on its own
-// (crash, OOM, guest-initiated exit).
+// (crash, OOM, guest-initiated exit). After any exit it records the final
+// hint's progress, while the store is least likely to have been altered.
 func (a *Activator) watchExit(g guest.Guest, gen uint64) {
 	<-g.Exited()
+	if a.spec.ProgressEnvKey != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := a.recordProgress(ctx); err != nil {
+			a.log.Warn("recording progress after exit", "err", err)
+		}
+		cancel()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.guest == g && a.state == Awake {
@@ -413,6 +470,11 @@ func (a *Activator) tick(ctx context.Context) {
 		if err != nil || !ok {
 			return
 		}
+		if a.spec.ProgressEnvKey != "" {
+			if err := a.noteProgress(h); err != nil {
+				a.log.Warn("recording progress", "err", err)
+			}
+		}
 		a.mu.Lock()
 		dueWake := h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration)) && !h.NextDue.Equal(a.wokeDue)
 		busyWake := h.Busy && (!a.wokeBusy || h.Generation > a.wokeBusyGen)
@@ -450,6 +512,11 @@ func (a *Activator) busy(ctx context.Context, gen uint64) (bool, error) {
 	h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
 	if err != nil {
 		return false, err
+	}
+	if ok && a.spec.ProgressEnvKey != "" {
+		if err := a.noteProgress(h); err != nil {
+			a.log.Warn("recording progress", "err", err)
+		}
 	}
 	return ok && h.Generation == gen && h.Busy, nil
 }

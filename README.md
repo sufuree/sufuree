@@ -105,6 +105,14 @@ agent left running, found by its state volume on the QEMU command line. A busy h
 sleeping workload once per hint generation, and an unreadable hint defers an
 idle stop at most three times. Wake hints are not authenticated: anyone who can write the hint store can
 cause wakes or defer idle stops (cost and availability, not data access).
+A hint may also report `progress`, an (`epoch`, `seq`) position the workload
+says is durably committed. With `progress_env_key`, the agent keeps the highest
+progress it has read (from every hint read, before each boot, and right after
+each guest exits) in its journal and passes it to every boot as
+`<epoch>:<seq>`. The workload can then refuse a store that was rolled back
+behind it, which the store alone cannot show. The agent cannot authenticate
+progress: a forged higher value can keep the workload from booting, never make
+it accept less. Progress reported after the agent's last read is not covered.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.

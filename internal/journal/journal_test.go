@@ -37,3 +37,25 @@ func TestCorruptRecordRefusesToIssue(t *testing.T) {
 		t.Fatal("issued a generation over a corrupt record")
 	}
 }
+
+func TestProgressOnlyAdvancesAndIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	j, _ := Open(dir)
+	if _, err := j.NextGeneration("w"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		epoch, seq uint64
+		up         bool
+	}{{2, 10, true}, {2, 10, false}, {2, 5, false}, {1, 99, false}, {2, 11, true}, {3, 1, true}} {
+		up, err := j.AdvanceProgress("w", c.epoch, c.seq)
+		if err != nil || up != c.up {
+			t.Fatalf("AdvanceProgress(%d, %d) = %v, %v; want %v", c.epoch, c.seq, up, err, c.up)
+		}
+	}
+	r, _ := Open(dir) // a restarted agent
+	got, err := r.Get("w")
+	if err != nil || got.ProgressEpoch != 3 || got.ProgressSeq != 1 || got.Generation != 1 {
+		t.Fatalf("after restart: %+v, %v", got, err)
+	}
+}
