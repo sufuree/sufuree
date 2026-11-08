@@ -97,10 +97,14 @@ type Activator struct {
 	wokeBusy    bool
 	wokeBusyGen uint64
 	wokeDue     time.Time
-	hintErrs    int // consecutive unreadable hints at idle stop
-	stats       Stats
-	stopControl chan struct{}
-	done        chan struct{}
+	// failedHintWakes counts consecutive failed scheduled wakes; hint
+	// wakes back off (hintBackoff) until one succeeds.
+	failedHintWakes int
+	hintWakeAfter   time.Time
+	hintErrs        int // consecutive unreadable hints at idle stop
+	stats           Stats
+	stopControl     chan struct{}
+	done            chan struct{}
 }
 
 // Stats are counters for receipts.
@@ -220,6 +224,7 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 		g, gen, err := a.bootOnce()
 		if err == nil {
 			a.mu.Lock()
+			a.failedHintWakes, a.hintWakeAfter = 0, time.Time{}
 			a.state, a.guest, a.generation = Awake, g, gen
 			a.awakeSince, a.lastActive = time.Now(), time.Now()
 			close(done)
@@ -237,7 +242,12 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 	a.mu.Lock()
 	a.state = Asleep
 	a.wakeErr = fmt.Errorf("%w: %v", ErrUnavailable, lastErr)
-	a.wokeBusy, a.wokeDue = false, time.Time{} // let the next hint poll retry
+	if scheduled {
+		// Let a later hint poll retry the trigger, after a backoff.
+		a.wokeBusy, a.wokeDue = false, time.Time{}
+		a.failedHintWakes++
+		a.hintWakeAfter = time.Now().Add(hintBackoff(a.failedHintWakes, a.opt.HintPoll))
+	}
 	close(done)
 	a.mu.Unlock()
 }
@@ -386,7 +396,7 @@ func (a *Activator) tick(ctx context.Context) {
 		a.mu.Lock()
 		dueWake := h.NextDue != nil && !time.Now().Before(h.NextDue.Add(-a.spec.ScheduledLead.Duration)) && !h.NextDue.Equal(a.wokeDue)
 		busyWake := h.Busy && (!a.wokeBusy || h.Generation > a.wokeBusyGen)
-		if (dueWake || busyWake) && a.state == Asleep && !a.closed {
+		if (dueWake || busyWake) && a.state == Asleep && !a.closed && !time.Now().Before(a.hintWakeAfter) {
 			if busyWake {
 				a.wokeBusy, a.wokeBusyGen = true, h.Generation
 			}
@@ -398,6 +408,17 @@ func (a *Activator) tick(ctx context.Context) {
 		}
 		a.mu.Unlock()
 	}
+}
+
+// hintBackoff is the delay before a hint may wake the workload again after
+// n consecutive failed scheduled wakes: the poll interval, doubled per
+// failure, capped at 5 minutes.
+func hintBackoff(n int, poll time.Duration) time.Duration {
+	d := poll
+	for i := 1; i < n && d < 5*time.Minute; i++ {
+		d *= 2
+	}
+	return min(d, 5*time.Minute)
 }
 
 // busy reads the current generation's hint. A hint from an older
