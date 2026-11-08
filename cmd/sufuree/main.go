@@ -59,6 +59,14 @@ func run(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
+	// One agent per data_dir: a second would steal sockets, race the
+	// journal and reap the first one's guests.
+	unlock, err := lockHost(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	j, err := journal.Open(filepath.Join(cfg.DataDir, "journal"))
 	if err != nil {
 		return err
@@ -97,15 +105,15 @@ func run(args []string) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(cfg.Workloads))
 	for _, w := range cfg.Workloads {
-		if reaped, err := launcher.Reap(w.ID); err != nil {
-			return fmt.Errorf("workload %s: reaping a leftover guest: %w", w.ID, err)
-		} else if reaped {
-			log.Warn("stopped a guest left running by an earlier agent", "workload", w.ID)
+		if n, err := launcher.Reap(w.ID); err != nil {
+			return fmt.Errorf("workload %s: reaping leftover guests: %w", w.ID, err)
+		} else if n > 0 {
+			log.Warn("stopped guests left running by an earlier agent", "workload", w.ID, "count", n)
 		}
 		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
 		gw := &gateway.Gateway{
 			ID: w.ID, SocketPath: filepath.Join(cfg.SocketDir, w.ID+".sock"), Act: act,
-			WakeTimeout: 2*w.StartupTimeout.Duration + 10*time.Second, Logger: log,
+			WakeTimeout: activator.WakeBudget(w, 0) + 10*time.Second, Logger: log,
 		}
 		if err := gw.Listen(); err != nil {
 			stop()
@@ -127,4 +135,21 @@ func run(args []string) error {
 	wg.Wait()
 	close(errs)
 	return <-errs
+}
+
+// lockHost takes an exclusive, non-blocking lock on <dataDir>/agent.lock
+// for the life of the process.
+func lockHost(dataDir string) (func(), error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dataDir, "agent.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("another sufuree agent holds %s: %w", dataDir, err)
+	}
+	return func() { _ = f.Close() }, nil
 }

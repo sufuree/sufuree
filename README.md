@@ -96,9 +96,12 @@ and a generation. A boot fails rather than start without them. They are for
 start-up and are not refreshed, so a guest must not depend on them after
 `duration`. `wake_hints`
 takes a `ca_file` for a store with a private CA.
-Each guest's boot volume is deleted when it exits, and a pidfile lets a
-restarted agent stop a guest an earlier agent left running. A busy hint wakes a
+One agent holds each `data_dir` (an exclusive lock). Each guest's boot volume
+is deleted when it exits, and at startup the agent stops any guest an earlier
+agent left running, found by its state volume on the QEMU command line. A busy hint wakes a
 sleeping workload once per hint generation, and an unreadable hint defers an
-idle stop at most three times. Stopping is crash-consistent: workloads must acknowledge only writes that are
+idle stop at most three times. Wake hints are not authenticated: anyone who can write the hint store can
+cause wakes or defer idle stops (cost and availability, not data access).
+Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.
