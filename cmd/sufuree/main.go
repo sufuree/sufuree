@@ -20,7 +20,11 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+
 	"github.com/sufuree/sufuree/internal/activator"
+	"github.com/sufuree/sufuree/internal/bootcred"
 	"github.com/sufuree/sufuree/internal/gateway"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
@@ -66,8 +70,25 @@ func run(args []string) error {
 		if !ok1 || !ok2 {
 			return errors.New("wake_hints needs SUFUREE_HINT_ACCESS_KEY and SUFUREE_HINT_SECRET_KEY")
 		}
-		hints = wakehint.NewS3(cfg.WakeHints.Endpoint, cfg.WakeHints.Region, cfg.WakeHints.Bucket, ak, sk)
+		var ca []byte
+		if f := cfg.WakeHints.CAFile; f != "" {
+			if ca, err = os.ReadFile(f); err != nil {
+				return fmt.Errorf("wake_hints.ca_file: %w", err)
+			}
+		}
+		if hints, err = wakehint.NewS3(cfg.WakeHints.Endpoint, cfg.WakeHints.Region, cfg.WakeHints.Bucket, ak, sk, ca); err != nil {
+			return err
+		}
 	}
+	// Per-boot credentials are issued with the agent's own AWS credentials
+	// (the default chain, such as the instance profile).
+	issuer := &bootcred.STS{NewClient: func(region string) (bootcred.AssumeRoler, error) {
+		c, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region))
+		if err != nil {
+			return nil, err
+		}
+		return sts.NewFromConfig(c), nil
+	}}
 	launcher := &guest.QEMU{DataDir: cfg.DataDir}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -76,7 +97,7 @@ func run(args []string) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(cfg.Workloads))
 	for _, w := range cfg.Workloads {
-		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log})
+		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
 		gw := &gateway.Gateway{
 			ID: w.ID, SocketPath: filepath.Join(cfg.SocketDir, w.ID+".sock"), Act: act,
 			WakeTimeout: 2*w.StartupTimeout.Duration + 10*time.Second, Logger: log,

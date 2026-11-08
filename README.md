@@ -88,6 +88,12 @@ KVM host. For each workload it:
 Each boot gets a fresh `boot` volume carrying `boot_env_file`, because a
 unikernel image's argv and environment are fixed at build time. `env:NAME`
 values are read from the agent's environment so secrets stay out of the config.
+With `boot_credentials`, each boot also gets its own short-lived AWS
+credentials: the agent assumes `role_arn` with its own credentials, tags the
+session with `session_tags` (the role's policy scopes access by them), and
+names it `<id>-g<generation>`, so CloudTrail attributes every use to a workload
+and a generation. A boot fails rather than start without them. `wake_hints`
+takes a `ca_file` for a store with a private CA.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.

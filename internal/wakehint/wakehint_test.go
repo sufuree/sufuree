@@ -18,7 +18,17 @@ func TestReadAgainstStore(t *testing.T) {
 	if ep == "" || bucket == "" {
 		t.Skip("no test object store configured")
 	}
-	r := NewS3(ep, "", bucket, os.Getenv("SUFUREE_HINT_ACCESS_KEY"), os.Getenv("SUFUREE_HINT_SECRET_KEY"))
+	var ca []byte
+	if f := os.Getenv("SUFUREE_TEST_S3_CA_FILE"); f != "" {
+		var err error
+		if ca, err = os.ReadFile(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := NewS3(ep, "", bucket, os.Getenv("SUFUREE_HINT_ACCESS_KEY"), os.Getenv("SUFUREE_HINT_SECRET_KEY"), ca)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	_, _ = r.c.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: &bucket})
 	prefix := "hint-test/" + time.Now().Format("150405.000000000")
@@ -33,5 +43,11 @@ func TestReadAgainstStore(t *testing.T) {
 	h, ok, err := r.Read(ctx, prefix)
 	if err != nil || !ok || h.Generation != 3 || !h.Busy || h.NextDue == nil || h.NextDue.Year() != 2030 {
 		t.Fatalf("hint = %+v ok=%v err=%v", h, ok, err)
+	}
+}
+
+func TestNewS3RejectsAnEmptyCA(t *testing.T) {
+	if _, err := NewS3("https://s3.example", "", "b", "a", "s", []byte("not pem")); err == nil {
+		t.Fatal("a CA file with no certificate was accepted")
 	}
 }

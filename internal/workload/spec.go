@@ -33,6 +33,38 @@ type ObjectStore struct {
 	Endpoint string `json:"endpoint"`
 	Region   string `json:"region,omitempty"`
 	Bucket   string `json:"bucket"`
+	// CAFile is a PEM bundle trusted in addition to the system roots, for
+	// a store with a private CA.
+	CAFile string `json:"ca_file,omitempty"`
+}
+
+// AWSRole issues each boot short-lived AWS credentials for one role,
+// scoped to this workload. The agent assumes the role with its own
+// credentials (the default AWS chain, such as the instance profile), tags
+// the session with SessionTags, and names it <id>-g<generation>, so the
+// role's policy can limit the guest to its own resources
+// (aws:PrincipalTag) and every use is attributable to a workload and a
+// generation. The credentials reach the guest in the boot env under the
+// keys in Env.
+type AWSRole struct {
+	RoleARN     string            `json:"role_arn"`
+	Region      string            `json:"region"`
+	SessionTags map[string]string `json:"session_tags"`
+	// Duration is the credentials' lifetime: 15m to 1h (default 15m).
+	Duration Duration   `json:"duration,omitempty"`
+	Env      AWSRoleEnv `json:"env"`
+}
+
+// AWSRoleEnv names the boot env keys that receive the credentials.
+type AWSRoleEnv struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	SessionToken    string `json:"session_token"`
+}
+
+// Keys returns the three env keys.
+func (e AWSRoleEnv) Keys() []string {
+	return []string{e.AccessKeyID, e.SecretAccessKey, e.SessionToken}
 }
 
 // Spec is one stateful unikernel workload.
@@ -57,6 +89,8 @@ type Spec struct {
 	// material a workload reads from a file, such as a key. Values use the
 	// same "env:NAME" indirection as BootEnv.
 	BootFiles map[string]string `json:"boot_files,omitempty"`
+	// BootCredentials, when set, issues per-boot credentials (see AWSRole).
+	BootCredentials *AWSRole `json:"boot_credentials,omitempty"`
 	// HintPrefix is the object-store prefix the guest publishes
 	// <prefix>/wake.json under.
 	HintPrefix string `json:"hint_prefix,omitempty"`
@@ -162,6 +196,46 @@ func (w Spec) validate() error {
 		if k == "" || strings.ContainsAny(k, "=\n") || strings.Contains(v, "\n") {
 			return bad("boot_env keys and values must be single-line KEY=VALUE")
 		}
+	}
+	if c := w.BootCredentials; c != nil {
+		if err := c.validate(w); err != nil {
+			return bad(err.Error())
+		}
+	}
+	return nil
+}
+
+// Session tag limits (AWS STS).
+var (
+	tagKeyPattern   = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]{1,128}$`)
+	tagValuePattern = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]{0,256}$`)
+)
+
+func (c *AWSRole) validate(w Spec) error {
+	switch {
+	case !strings.HasPrefix(c.RoleARN, "arn:") || !strings.Contains(c.RoleARN, ":role/"):
+		return errors.New("boot_credentials.role_arn must be an IAM role ARN")
+	case c.Region == "":
+		return errors.New("boot_credentials.region is required")
+	case len(c.SessionTags) == 0:
+		return errors.New("boot_credentials.session_tags must scope the session (at least one tag)")
+	case len(c.SessionTags) > 50:
+		return errors.New("boot_credentials.session_tags allows at most 50 tags")
+	case c.Duration.Duration != 0 && (c.Duration.Duration < 15*time.Minute || c.Duration.Duration > time.Hour):
+		return errors.New("boot_credentials.duration must be between 15m and 1h")
+	}
+	for k, v := range c.SessionTags {
+		if !tagKeyPattern.MatchString(k) || !tagValuePattern.MatchString(v) {
+			return fmt.Errorf("boot_credentials.session_tags %q is not a valid STS tag", k)
+		}
+	}
+	seen := map[string]bool{}
+	for _, k := range c.Env.Keys() {
+		_, inEnv := w.BootEnv[k]
+		if k == "" || strings.ContainsAny(k, "=\n") || seen[k] || inEnv || k == w.GenerationEnvKey {
+			return errors.New("boot_credentials.env needs three distinct keys not used by boot_env or generation_env_key")
+		}
+		seen[k] = true
 	}
 	return nil
 }

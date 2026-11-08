@@ -9,13 +9,17 @@ package wakehint
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
@@ -41,18 +45,31 @@ type S3 struct {
 	bucket string
 }
 
-// NewS3 builds a reader. Credentials are passed in, never logged.
-func NewS3(endpoint, region, bucket, accessKey, secretKey string) *S3 {
+// NewS3 builds a reader. Credentials are passed in, never logged. caPEM,
+// when set, is trusted in addition to the system roots.
+func NewS3(endpoint, region, bucket, accessKey, secretKey string, caPEM []byte) (*S3, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
-	c := awss3.New(awss3.Options{
+	o := awss3.Options{
 		Region:       region,
 		BaseEndpoint: aws.String(endpoint),
 		UsePathStyle: true,
 		Credentials:  credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
-	})
-	return &S3{c: c, bucket: bucket}
+	}
+	if len(caPEM) > 0 {
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("wake hints: ca_file holds no PEM certificate")
+		}
+		o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+			t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		})
+	}
+	return &S3{c: awss3.New(o), bucket: bucket}, nil
 }
 
 // Read returns the hint, or ok=false when none has been published.
