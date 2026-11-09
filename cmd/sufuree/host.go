@@ -98,7 +98,23 @@ func runHost(args []string) error {
 		if unreadable > 0 {
 			log.Warn("some processes could not be checked for a leftover guest", "workload", w.ID, "unreadable", unreadable)
 		}
-		act := activator.New(w, j, launcher, hints, activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer})
+		opt := activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer}
+		wh := hints
+		if w.HintKeyEnvKey != "" {
+			key, err := wakehint.LoadOrCreateKey(filepath.Join(cfg.DataDir, "hintkeys"), w.ID)
+			if err != nil {
+				return fmt.Errorf("workload %s: hint key: %w", w.ID, err)
+			}
+			src, ok := hints.(wakehint.RawReader)
+			if !ok {
+				return fmt.Errorf("workload %s: hint_key_env_key needs wake_hints", w.ID)
+			}
+			id := w.ID
+			opt.HintKey, wh = key, &wakehint.Verifying{Source: src, Key: key, OnRefused: func(err error) {
+				log.Warn("refused a wake hint; using the last authentic one", "workload", id, "err", err)
+			}}
+		}
+		act := activator.New(w, j, launcher, wh, opt)
 		gw := &gateway.Gateway{
 			ID: w.ID, SocketPath: filepath.Join(cfg.SocketDir, w.ID+".sock"), Act: act,
 			WakeTimeout: activator.WakeBudget(w, 0) + 10*time.Second, Logger: log,
