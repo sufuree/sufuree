@@ -18,6 +18,7 @@ package activator
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -68,6 +69,9 @@ type Options struct {
 	// Credentials issues per-boot credentials for a workload with
 	// boot_credentials. A boot of such a workload fails without it.
 	Credentials bootcred.Issuer
+	// HintKey is the workload's hint key (hint_key_env_key), passed to
+	// every boot. A boot of such a workload fails without it.
+	HintKey []byte
 }
 
 // Activator manages one workload.
@@ -263,6 +267,12 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 	}
 	if err := a.progressEnv(env); err != nil {
 		return nil, 0, err
+	}
+	if k := a.spec.HintKeyEnvKey; k != "" {
+		if len(a.opt.HintKey) != wakehint.KeySize {
+			return nil, 0, errors.New("hint_key_env_key is set but the agent has no hint key")
+		}
+		env[k] = hex.EncodeToString(a.opt.HintKey)
 	}
 	files, err := a.spec.ResolveBootFiles(a.opt.Getenv)
 	if err != nil {

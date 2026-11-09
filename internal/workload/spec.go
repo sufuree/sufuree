@@ -100,6 +100,11 @@ type Spec struct {
 	// have reported, as "<epoch>:<seq>", on every boot after the first
 	// report (see wakehint.Progress). Requires hint_prefix.
 	ProgressEnvKey string `json:"progress_env_key,omitempty"`
+	// HintKeyEnvKey, when set, receives this workload's hint key (hex),
+	// generated and kept by the host, on every boot; the host then accepts
+	// only hints signed with it (see wakehint.Verifying). Requires
+	// hint_prefix.
+	HintKeyEnvKey string `json:"hint_key_env_key,omitempty"`
 
 	IdleTimeout    Duration `json:"idle_timeout"`
 	StartupTimeout Duration `json:"startup_timeout"`
@@ -208,6 +213,15 @@ func (w Spec) validate() error {
 	if _, clash := w.BootEnv[w.ProgressEnvKey]; clash && w.ProgressEnvKey != "" {
 		return bad("progress_env_key must not also be in boot_env")
 	}
+	if k := w.HintKeyEnvKey; k != "" {
+		_, inEnv := w.BootEnv[k]
+		switch {
+		case w.HintPrefix == "":
+			return bad("hint_key_env_key needs hint_prefix")
+		case strings.ContainsAny(k, "=\n\r"), inEnv, k == w.GenerationEnvKey, k == w.ProgressEnvKey:
+			return bad("hint_key_env_key must be a plain key not used by boot_env, generation_env_key or progress_env_key")
+		}
+	}
 	for name := range w.BootFiles {
 		if !plainName(name) || name == w.BootEnvFile {
 			return bad("boot_files names must be plain file names other than boot_env_file")
@@ -258,8 +272,8 @@ func (c *AWSRole) validate(w Spec) error {
 	seen := map[string]bool{}
 	for _, k := range c.Env.Keys() {
 		_, inEnv := w.BootEnv[k]
-		if k == "" || strings.ContainsAny(k, "=\n") || seen[k] || inEnv || k == w.GenerationEnvKey || k == w.ProgressEnvKey {
-			return errors.New("boot_credentials.env needs three distinct keys not used by boot_env, generation_env_key or progress_env_key")
+		if k == "" || strings.ContainsAny(k, "=\n") || seen[k] || inEnv || k == w.GenerationEnvKey || k == w.ProgressEnvKey || k == w.HintKeyEnvKey {
+			return errors.New("boot_credentials.env needs three distinct keys not used by boot_env, generation_env_key, progress_env_key or hint_key_env_key")
 		}
 		seen[k] = true
 	}

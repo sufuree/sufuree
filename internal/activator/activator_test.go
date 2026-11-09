@@ -2,6 +2,7 @@ package activator
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -597,5 +598,47 @@ func TestProgressIsRecordedAfterACrashAndKeptWhenTheHintIsUnreadable(t *testing.
 	defer l.mu.Unlock()
 	if got := l.envs[len(l.envs)-1]["MIN"]; got != "1:7" {
 		t.Fatalf("boot with an unreadable hint got %q, want the recorded 1:7", got)
+	}
+}
+
+func TestHintKeyReachesEveryBoot(t *testing.T) {
+	key := make([]byte, wakehint.KeySize)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	w := spec()
+	w.HintKeyEnvKey = "HINTKEY"
+	newAct := func(k []byte) (*Activator, *fakeLauncher) {
+		j, err := journal.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		l := &fakeLauncher{}
+		a := New(w, j, l, nil, Options{
+			Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond, Attempts: 1, HintKey: k,
+			Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+			Ready:  func(context.Context, string) error { return nil },
+		})
+		run(t, a)
+		return a, l
+	}
+	a, l := newAct(key)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	l.mu.Lock()
+	got := l.envs[0]["HINTKEY"]
+	l.mu.Unlock()
+	if got != hex.EncodeToString(key) {
+		t.Fatalf("boot env hint key %q", got)
+	}
+	a, l = newAct(nil)
+	if _, _, err := a.Acquire(context.Background()); err == nil {
+		t.Fatal("a workload with hint_key_env_key booted without a key")
+	}
+	if l.count() != 0 {
+		t.Fatal("the launcher was called without a hint key")
 	}
 }

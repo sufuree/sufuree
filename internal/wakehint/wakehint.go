@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +24,8 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// Hint is the published document (version 1).
+// Hint is the published document (version 1, or the hint inside a signed
+// version 2 envelope; see signed.go).
 type Hint struct {
 	Version    int        `json:"version"`
 	Generation uint64     `json:"generation"`
@@ -43,8 +43,9 @@ type Hint struct {
 // ignores progress naming a generation it never issued. It keeps the
 // highest it has seen and passes it to the next boot (progress_env_key), so
 // the workload can refuse its own store if that store was rolled back
-// behind it. The host cannot authenticate it: a forged higher value can
-// stop the workload from booting, never make it accept less.
+// behind it. Unless the hint is signed (hint_key_env_key), the host cannot
+// authenticate it: a forged higher value can stop the workload from
+// booting, never make it accept less.
 type Progress struct {
 	Epoch uint64 `json:"epoch"`
 	Seq   uint64 `json:"seq"`
@@ -93,25 +94,36 @@ func NewS3(endpoint, region, bucket, accessKey, secretKey string, caPEM []byte) 
 	return &S3{c: awss3.New(o), bucket: bucket}, nil
 }
 
-// Read returns the hint, or ok=false when none has been published.
+// Read returns the hint, unverified, or ok=false when none has been
+// published. Use Verifying for a workload with a hint key.
 func (s *S3) Read(ctx context.Context, prefix string) (Hint, bool, error) {
+	data, ok, err := s.ReadRaw(ctx, prefix)
+	if err != nil || !ok {
+		return Hint{}, ok, err
+	}
+	h, err := Parse(data, prefix, nil)
+	if err != nil {
+		return Hint{}, false, fmt.Errorf("%s/wake.json: %w", prefix, err)
+	}
+	return h, true, nil
+}
+
+// ReadRaw returns the published hint's bytes (at most 4 KiB), or ok=false
+// when none has been published.
+func (s *S3) ReadRaw(ctx context.Context, prefix string) ([]byte, bool, error) {
 	key := prefix + "/wake.json"
 	out, err := s.c.GetObject(ctx, &awss3.GetObjectInput{Bucket: &s.bucket, Key: &key})
 	if err != nil {
 		var ae smithy.APIError
 		if errors.As(err, &ae) && (ae.ErrorCode() == "NoSuchKey" || ae.ErrorCode() == "NotFound") {
-			return Hint{}, false, nil
+			return nil, false, nil
 		}
-		return Hint{}, false, err
+		return nil, false, err
 	}
 	defer func() { _ = out.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(out.Body, 4096))
 	if err != nil {
-		return Hint{}, false, err
+		return nil, false, err
 	}
-	var h Hint
-	if err := json.Unmarshal(data, &h); err != nil || h.Version != 1 {
-		return Hint{}, false, fmt.Errorf("wakehint: %s is not a version 1 hint", key)
-	}
-	return h, true, nil
+	return data, true, nil
 }
