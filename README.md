@@ -120,16 +120,25 @@ any existing volume with that name into `data_dir/volumes.quarantine`. Each gues
 is deleted when it exits, and at startup the agent stops any guest an earlier
 agent left running, found by its state volume on the QEMU command line. A busy hint wakes a
 sleeping workload once per hint generation, and an unreadable hint defers an
-idle stop at most three times. Wake hints are not authenticated: anyone who can write the hint store can
-cause wakes or defer idle stops (cost and availability, not data access).
+idle stop at most three times. Without `hint_key_env_key`, wake hints are not
+authenticated: anyone who can write the hint store can forge `busy`, `next_due`
+or `progress` (cost and availability, not data access). With `hint_key_env_key`,
+the agent creates a per-workload HMAC key under `data_dir/hintkeys/` (0600,
+never in the hint store), passes it in each boot env, and accepts only version-2
+envelopes whose MAC verifies for that workload's `hint_prefix`. Unsigned,
+altered, or older signed hints are refused; the agent keeps the last authentic
+hint in memory (so deleting `wake.json` cannot force a stop). The in-memory
+replay floor resets on agent restart: a MAC-valid older hint can be accepted
+once until a newer authentic hint is seen. There is no key rotation yet.
 A hint may also report `progress`, an (`epoch`, `seq`) position the workload
 says is durably committed. With `progress_env_key`, the agent keeps the highest
 progress it has read (from every hint read, before each boot, and right after
 each guest exits) in its journal and passes it to every boot as
 `<epoch>:<seq>`. The workload can then refuse a store that was rolled back
-behind it, which the store alone cannot show. The agent cannot authenticate
-progress: a forged higher value can keep the workload from booting, never make
-it accept less. Progress reported after the agent's last read is not covered.
+behind it, which the store alone cannot show. When hints are signed, progress
+inside the envelope is MAC-protected; without a hint key a forged higher value
+can keep the workload from booting, never make it accept less. Progress
+reported after the agent's last read is not covered.
 Progress whose epoch, or whose hint generation, is above the highest
 generation the agent has issued is ignored with a warning, so a forged value
 must stay within issued generations. A record holding progress is journal
