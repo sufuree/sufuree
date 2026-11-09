@@ -642,3 +642,44 @@ func TestHintKeyReachesEveryBoot(t *testing.T) {
 		t.Fatal("the launcher was called without a hint key")
 	}
 }
+
+// flipSource serves one signed hint, then whatever junk is stored after it.
+type flipSource struct {
+	mu    sync.Mutex
+	first []byte
+	then  []byte
+	reads int
+}
+
+func (f *flipSource) ReadRaw(context.Context, string) ([]byte, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	if f.reads == 1 {
+		return f.first, true, nil
+	}
+	return f.then, true, nil
+}
+
+// TestRefusedHintsCannotHoldAnOldBusyForever: once a signed busy hint was
+// accepted, a store that keeps serving refused hints only defers the idle
+// stop maxHintErrors times, as an unreadable hint does.
+func TestRefusedHintsCannotHoldAnOldBusyForever(t *testing.T) {
+	key := make([]byte, wakehint.KeySize)
+	hint := []byte(`{"version":2,"generation":1,"busy":true,"updated_at":"2026-11-09T00:00:00Z","seq":1}`)
+	env := `{"version":2,"hint":` + string(hint) + `,"mac":"` + hex.EncodeToString(wakehint.MAC(key, "inst/w1", hint)) + `"}`
+	src := &flipSource{first: []byte(env), then: []byte(`{"version":1,"generation":1,"busy":true,"updated_at":"2026-11-09T00:00:00Z"}`)}
+	v := &wakehint.Verifying{Source: src, Key: key}
+	l := &fakeLauncher{}
+	a, _ := newAct(t, l, v, nil)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	run(t, a)
+	waitFor(t, "stop despite a held busy fallback", func() bool { st, _, _, _ := a.Snapshot(); return st == Asleep })
+	if _, _, _, s := a.Snapshot(); s.BusyVetoes != maxHintErrors+1 {
+		t.Fatalf("vetoes = %d, want %d (one genuine busy, then the unreadable bound)", s.BusyVetoes, maxHintErrors+1)
+	}
+}

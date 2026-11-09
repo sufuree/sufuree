@@ -363,6 +363,9 @@ func (a *Activator) recordProgress(ctx context.Context) error {
 		return nil
 	}
 	h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
+	if errors.Is(err, wakehint.ErrFallback) {
+		err = nil // the last authentic hint's progress still counts
+	}
 	if err != nil || !ok {
 		return err
 	}
@@ -497,7 +500,9 @@ func (a *Activator) tick(ctx context.Context) {
 		a.lastHintAt = time.Now()
 		a.mu.Unlock()
 		h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
-		if err != nil || !ok {
+		// A fallback is the last authentic hint: a sleeping workload's hint
+		// does not change, so it still schedules the wake.
+		if (err != nil && !errors.Is(err, wakehint.ErrFallback)) || !ok {
 			return
 		}
 		if a.spec.ProgressEnvKey != "" {
@@ -541,6 +546,9 @@ func (a *Activator) busy(ctx context.Context, gen uint64) (bool, error) {
 	}
 	h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
 	if err != nil {
+		// Including a fallback: an awake workload republishes, so a stored
+		// hint that keeps being refused counts toward maxHintErrors rather
+		// than vetoing the stop on an old "busy" forever.
 		return false, err
 	}
 	if ok && a.spec.ProgressEnvKey != "" {

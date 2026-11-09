@@ -118,23 +118,35 @@ type RawReader interface {
 // and replayed ones. Use one per workload.
 //
 // It keeps the newest authentic hint it has accepted. When the stored hint
-// is then missing, unsigned, altered or older, Read returns that hint
-// instead (and reports the refusal to OnRefused), so deleting or replacing
-// wake.json can neither force a stop nor suppress a scheduled wake: a
-// sleeping workload's hint does not change, and an awake one republishes
-// within its publish interval. Before any hint is accepted, a missing hint
-// is ok=false and an invalid one an error.
+// is then missing, unsigned, altered or older, Read returns that hint, ok,
+// and an error wrapping ErrFallback (and the refusal). A caller deciding
+// what a sleeping workload needs can use the hint: its hint does not
+// change, so deleting or replacing wake.json cannot suppress a scheduled
+// wake. A caller vetoing an idle stop must treat it as unreadable, so a
+// store that keeps serving refused hints cannot hold an old "busy" forever.
+// Before any hint is accepted, a missing hint is ok=false and an invalid
+// one an error.
 type Verifying struct {
 	Source RawReader
 	Key    []byte
-	// OnRefused, when set, is told of every stored hint refused in favour
-	// of the last accepted one (for logging).
+	// OnRefused, when set, is told of refused stored hints (for logging):
+	// every missing, unsigned or altered one, and an older one once it has
+	// been refused staleReportAfter times in a row (one alone can be a
+	// concurrent read's older bytes).
 	OnRefused func(error)
 
-	mu   sync.Mutex
-	last Hint
-	seen bool
+	mu    sync.Mutex
+	last  Hint
+	seen  bool
+	stale int // consecutive stale refusals
 }
+
+// staleReportAfter is how many consecutive stale refusals are reported.
+const staleReportAfter = 3
+
+// ErrFallback marks a Read that returned the last accepted hint because
+// the stored one was refused.
+var ErrFallback = errors.New("using the last authentic wake hint")
 
 // Read implements Reader.
 func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error) {
@@ -159,20 +171,27 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 	if err == nil && v.seen && (h.Generation < v.last.Generation || (h.Generation == v.last.Generation && h.Seq < v.last.Seq)) {
 		err = fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
 	}
-	if err != nil {
-		if !v.seen {
-			if !ok {
-				return Hint{}, false, nil
-			}
-			return Hint{}, false, err
-		}
-		if v.OnRefused != nil && !errors.Is(err, ErrStale) {
-			v.OnRefused(err) // a stale read can be a concurrent read's older bytes
-		}
-		return v.last, true, nil
+	if err == nil {
+		v.seen, v.last, v.stale = true, h, 0
+		return h, true, nil
 	}
-	v.seen, v.last = true, h
-	return h, true, nil
+	if !v.seen {
+		if !ok {
+			return Hint{}, false, nil
+		}
+		return Hint{}, false, err
+	}
+	report := true
+	if errors.Is(err, ErrStale) {
+		v.stale++
+		report = v.stale >= staleReportAfter
+	} else {
+		v.stale = 0
+	}
+	if report && v.OnRefused != nil {
+		v.OnRefused(err)
+	}
+	return v.last, true, fmt.Errorf("%w: %w", ErrFallback, err)
 }
 
 // LoadOrCreateKey returns workload id's hint key from dir, creating it

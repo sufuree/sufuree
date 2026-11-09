@@ -100,29 +100,37 @@ func TestVerifyingKeepsTheLastAuthenticHint(t *testing.T) {
 	at := func(gen, seq, ts string) string {
 		return `{"version":2,"generation":` + gen + `,"busy":false,"updated_at":"2026-11-09T00:00:` + ts + `Z","seq":` + seq + `}`
 	}
-	steps := []struct {
+	type step struct {
 		data          []byte
 		gen, seq      uint64 // the hint Read must return
+		fallback      bool   // returned with ErrFallback
 		refusedLogged bool
-	}{
-		{sign(key, p, at("5", "3", "10")), 5, 3, false},
-		{sign(key, p, at("5", "3", "10")), 5, 3, false}, // re-read unchanged
-		{sign(key, p, at("5", "4", "20")), 5, 4, false}, // newer
-		{sign(key, p, at("5", "5", "01")), 5, 5, false}, // newer, guest clock stepped back
-		{sign(key, p, at("5", "2", "59")), 5, 5, false}, // older in the generation: kept, not logged (a concurrent read)
-		{sign(key, p, at("4", "9", "59")), 5, 5, false}, // older generation
-		{nil, 5, 5, true}, // deleted
-		{[]byte(strings.Replace(at("9", "1", "00"), "false", "true", 1)), 5, 5, true}, // unsigned busy
-		{signed(at("9", "1", "00"), strings.Repeat("0", 64)), 5, 5, true},             // bad MAC
-		{sign(key, "inst/other", at("9", "1", "00")), 5, 5, true},                     // another prefix's hint
-		{sign(key, p, at("6", "1", "00")), 6, 1, false},                               // next boot
+	}
+	stale := sign(key, p, at("5", "2", "59"))
+	steps := []step{
+		{sign(key, p, at("5", "3", "10")), 5, 3, false, false},
+		{sign(key, p, at("5", "3", "10")), 5, 3, false, false}, // re-read unchanged
+		{sign(key, p, at("5", "4", "20")), 5, 4, false, false}, // newer
+		{sign(key, p, at("5", "5", "01")), 5, 5, false, false}, // newer, guest clock stepped back
+		{stale, 5, 5, true, false},                             // older: one alone can be a concurrent read
+		{stale, 5, 5, true, false},
+		{stale, 5, 5, true, true},                                                           // the third in a row is reported
+		{sign(key, p, at("4", "9", "59")), 5, 5, true, true},                                // older generation: the fourth stale in a row
+		{nil, 5, 5, true, true},                                                             // deleted
+		{[]byte(strings.Replace(at("9", "1", "00"), "false", "true", 1)), 5, 5, true, true}, // unsigned busy
+		{signed(at("9", "1", "00"), strings.Repeat("0", 64)), 5, 5, true, true},             // bad MAC
+		{sign(key, "inst/other", at("9", "1", "00")), 5, 5, true, true},                     // another prefix's hint
+		{sign(key, p, at("6", "1", "00")), 6, 1, false, false},                              // next boot
 	}
 	for i, s := range steps {
 		src.data = s.data
 		n := len(refused)
 		h, ok, err := v.Read(ctx, p)
-		if err != nil || !ok || h.Generation != s.gen || h.Seq != s.seq {
+		if !ok || h.Generation != s.gen || h.Seq != s.seq {
 			t.Fatalf("step %d: %+v ok=%v err=%v, want generation %d seq %d", i, h, ok, err, s.gen, s.seq)
+		}
+		if s.fallback != errors.Is(err, ErrFallback) || (!s.fallback && err != nil) {
+			t.Fatalf("step %d: err %v, want fallback %v", i, err, s.fallback)
 		}
 		if logged := len(refused) > n; logged != s.refusedLogged {
 			t.Fatalf("step %d: refusal reported = %v, want %v", i, logged, s.refusedLogged)
