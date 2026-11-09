@@ -32,6 +32,9 @@ type Hint struct {
 	Busy       bool       `json:"busy"`
 	NextDue    *time.Time `json:"next_due,omitempty"`
 	UpdatedAt  time.Time  `json:"updated_at"`
+	// Seq orders one generation's hints (version 2): it rises with every
+	// publish, independent of the guest's clock.
+	Seq uint64 `json:"seq,omitempty"`
 	// Progress, when present, is the workload's durable position (see
 	// Progress). Optional.
 	Progress *Progress `json:"progress,omitempty"`
