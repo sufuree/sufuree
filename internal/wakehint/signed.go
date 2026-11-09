@@ -116,13 +116,23 @@ type RawReader interface {
 
 // Verifying reads one workload's signed hints, refusing unsigned, altered
 // and replayed ones. Use one per workload.
+//
+// It keeps the newest authentic hint it has accepted. When the stored hint
+// is then missing, unsigned, altered or older, Read returns that hint
+// instead (and reports the refusal to OnRefused), so deleting or replacing
+// wake.json can neither force a stop nor suppress a scheduled wake: a
+// sleeping workload's hint does not change, and an awake one republishes
+// within its publish interval. Before any hint is accepted, a missing hint
+// is ok=false and an invalid one an error.
 type Verifying struct {
 	Source RawReader
 	Key    []byte
+	// OnRefused, when set, is told of every stored hint refused in favour
+	// of the last accepted one (for logging).
+	OnRefused func(error)
 
 	mu   sync.Mutex
-	gen  uint64
-	seq  uint64
+	last Hint
 	seen bool
 }
 
@@ -132,19 +142,36 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 		return Hint{}, false, errors.New("wakehint: no hint key")
 	}
 	data, ok, err := v.Source.ReadRaw(ctx, prefix)
-	if err != nil || !ok {
-		return Hint{}, ok, err
-	}
-	h, err := Parse(data, prefix, v.Key)
 	if err != nil {
-		return Hint{}, false, fmt.Errorf("%s/wake.json: %w", prefix, err)
+		return Hint{}, false, err
+	}
+	var h Hint
+	switch {
+	case !ok:
+		err = fmt.Errorf("%s/wake.json: %w: the hint is missing", prefix, ErrUnauthenticated)
+	default:
+		if h, err = Parse(data, prefix, v.Key); err != nil {
+			err = fmt.Errorf("%s/wake.json: %w", prefix, err)
+		}
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.seen && (h.Generation < v.gen || (h.Generation == v.gen && h.Seq < v.seq)) {
-		return Hint{}, false, fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
+	if err == nil && v.seen && (h.Generation < v.last.Generation || (h.Generation == v.last.Generation && h.Seq < v.last.Seq)) {
+		err = fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
 	}
-	v.seen, v.gen, v.seq = true, h.Generation, h.Seq
+	if err != nil {
+		if !v.seen {
+			if !ok {
+				return Hint{}, false, nil
+			}
+			return Hint{}, false, err
+		}
+		if v.OnRefused != nil && !errors.Is(err, ErrStale) {
+			v.OnRefused(err) // a stale read can be a concurrent read's older bytes
+		}
+		return v.last, true, nil
+	}
+	v.seen, v.last = true, h
 	return h, true, nil
 }
 
@@ -166,18 +193,24 @@ func LoadOrCreateKey(dir, id string) ([]byte, error) {
 	if _, err := rand.Read(k); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return readKey(p) // created concurrently
-	}
+	// Written in full to a temporary file and linked into place, so a crash
+	// never leaves a partial key behind.
+	f, err := os.CreateTemp(dir, "."+id+".key-*")
 	if err != nil {
 		return nil, err
 	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	cherr := f.Chmod(0o600)
 	_, werr := f.Write(k)
 	serr := f.Sync()
 	cerr := f.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		_ = os.Remove(p)
+	if err := errors.Join(cherr, werr, serr, cerr); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tmp, p); errors.Is(err, fs.ErrExist) {
+		return readKey(p) // created concurrently
+	} else if err != nil {
 		return nil, err
 	}
 	if d, err := os.Open(dir); err == nil {

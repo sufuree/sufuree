@@ -84,42 +84,49 @@ func sign(key []byte, prefix, hint string) []byte {
 	return signed(hint, hex.EncodeToString(MAC(key, prefix, []byte(hint))))
 }
 
-func TestVerifyingRefusesReplays(t *testing.T) {
+func TestVerifyingKeepsTheLastAuthenticHint(t *testing.T) {
 	ctx, key, p := context.Background(), testKey(), "inst/abc"
 	src := &rawStore{}
-	v := &Verifying{Source: src, Key: key}
+	var refused []error
+	v := &Verifying{Source: src, Key: key, OnRefused: func(err error) { refused = append(refused, err) }}
 	if _, ok, err := v.Read(ctx, p); ok || err != nil {
-		t.Fatalf("no hint: ok=%v err=%v", ok, err)
+		t.Fatalf("no hint yet: ok=%v err=%v", ok, err)
+	}
+	src.data = []byte(`{"version":1,"generation":5,"busy":true,"updated_at":"2026-11-09T00:00:00Z"}`)
+	if _, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("unsigned before any accepted: %v, want ErrUnauthenticated", err)
 	}
 	// at(gen, seq, ts): the clock (ts) never decides order.
 	at := func(gen, seq, ts string) string {
-		return `{"version":2,"generation":` + gen + `,"busy":true,"updated_at":"2026-11-09T00:00:` + ts + `Z","seq":` + seq + `}`
+		return `{"version":2,"generation":` + gen + `,"busy":false,"updated_at":"2026-11-09T00:00:` + ts + `Z","seq":` + seq + `}`
 	}
 	steps := []struct {
-		hint string
-		ok   bool
+		data          []byte
+		gen, seq      uint64 // the hint Read must return
+		refusedLogged bool
 	}{
-		{at("5", "3", "10"), true},
-		{at("5", "3", "10"), true},  // re-read unchanged
-		{at("5", "4", "20"), true},  // newer
-		{at("5", "5", "01"), true},  // newer, after the guest clock stepped back
-		{at("5", "2", "59"), false}, // older within the generation
-		{at("4", "9", "59"), false}, // older generation
-		{at("6", "1", "00"), true},  // next boot
+		{sign(key, p, at("5", "3", "10")), 5, 3, false},
+		{sign(key, p, at("5", "3", "10")), 5, 3, false}, // re-read unchanged
+		{sign(key, p, at("5", "4", "20")), 5, 4, false}, // newer
+		{sign(key, p, at("5", "5", "01")), 5, 5, false}, // newer, guest clock stepped back
+		{sign(key, p, at("5", "2", "59")), 5, 5, false}, // older in the generation: kept, not logged (a concurrent read)
+		{sign(key, p, at("4", "9", "59")), 5, 5, false}, // older generation
+		{nil, 5, 5, true}, // deleted
+		{[]byte(strings.Replace(at("9", "1", "00"), "false", "true", 1)), 5, 5, true}, // unsigned busy
+		{signed(at("9", "1", "00"), strings.Repeat("0", 64)), 5, 5, true},             // bad MAC
+		{sign(key, "inst/other", at("9", "1", "00")), 5, 5, true},                     // another prefix's hint
+		{sign(key, p, at("6", "1", "00")), 6, 1, false},                               // next boot
 	}
 	for i, s := range steps {
-		src.data = sign(key, p, s.hint)
-		_, ok, err := v.Read(ctx, p)
-		if s.ok && (err != nil || !ok) {
-			t.Fatalf("step %d: ok=%v err=%v, want accepted", i, ok, err)
+		src.data = s.data
+		n := len(refused)
+		h, ok, err := v.Read(ctx, p)
+		if err != nil || !ok || h.Generation != s.gen || h.Seq != s.seq {
+			t.Fatalf("step %d: %+v ok=%v err=%v, want generation %d seq %d", i, h, ok, err, s.gen, s.seq)
 		}
-		if !s.ok && !errors.Is(err, ErrStale) {
-			t.Fatalf("step %d: ok=%v err=%v, want ErrStale", i, ok, err)
+		if logged := len(refused) > n; logged != s.refusedLogged {
+			t.Fatalf("step %d: refusal reported = %v, want %v", i, logged, s.refusedLogged)
 		}
-	}
-	src.data = []byte(at("7", "1", "00")) // unsigned
-	if _, _, err := v.Read(ctx, p); err == nil {
-		t.Fatal("an unsigned hint was accepted")
 	}
 	if _, _, err := (&Verifying{Source: src}).Read(ctx, p); err == nil {
 		t.Fatal("a verifier without a key read a hint")
@@ -165,5 +172,12 @@ func TestLoadOrCreateKey(t *testing.T) {
 	}
 	if _, err := LoadOrCreateKey(dir, "w4"); err == nil {
 		t.Fatal("a symlinked key was accepted")
+	}
+	// A crash mid-creation leaves only a temporary file, never a partial key.
+	if err := os.WriteFile(filepath.Join(dir, ".w5.key-123"), []byte("par"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := LoadOrCreateKey(dir, "w5"); err != nil || len(k) != KeySize {
+		t.Fatalf("after an interrupted creation: %d bytes, %v", len(k), err)
 	}
 }
