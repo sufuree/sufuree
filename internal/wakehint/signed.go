@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // Signed hints (version 2).
@@ -35,9 +34,11 @@ import (
 // workload's hint from being copied over another's.
 //
 // Verifying refuses unsigned or altered hints and replays: a hint older
-// than one it has accepted (lower generation, or the same generation with
-// an earlier updated_at). That record is in memory, so the first hint read
-// after an agent restart is accepted if its MAC verifies.
+// than one it has accepted, ordered by (generation, seq). seq is the
+// guest's per-boot publish counter, so a guest clock that steps backward
+// does not make its later hints look stale. That record is in memory, so
+// the first hint read after an agent restart is accepted if its MAC
+// verifies.
 
 // MACLabel is the MAC domain separator, shared with workloads.
 const MACLabel = "sufuree wake hint v2"
@@ -102,8 +103,8 @@ func Parse(data []byte, prefix string, key []byte) (Hint, error) {
 		}
 	}
 	var h Hint
-	if err := json.Unmarshal(e.Hint, &h); err != nil || h.Version != 2 {
-		return Hint{}, errors.New("wakehint: the signed hint is not a version 2 hint")
+	if err := json.Unmarshal(e.Hint, &h); err != nil || h.Version != 2 || h.Seq == 0 {
+		return Hint{}, errors.New("wakehint: the signed hint is not a version 2 hint with a seq")
 	}
 	return h, nil
 }
@@ -121,7 +122,7 @@ type Verifying struct {
 
 	mu   sync.Mutex
 	gen  uint64
-	at   time.Time
+	seq  uint64
 	seen bool
 }
 
@@ -140,10 +141,10 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.seen && (h.Generation < v.gen || (h.Generation == v.gen && h.UpdatedAt.Before(v.at))) {
+	if v.seen && (h.Generation < v.gen || (h.Generation == v.gen && h.Seq < v.seq)) {
 		return Hint{}, false, fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
 	}
-	v.seen, v.gen, v.at = true, h.Generation, h.UpdatedAt
+	v.seen, v.gen, v.seq = true, h.Generation, h.Seq
 	return h, true, nil
 }
 

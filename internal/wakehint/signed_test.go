@@ -18,11 +18,11 @@ func testKey() []byte {
 	return k
 }
 
-const kat = `{"version":2,"generation":7,"busy":false,"updated_at":"2026-11-09T00:00:00Z"}`
+const kat = `{"version":2,"generation":7,"busy":false,"updated_at":"2026-11-09T00:00:00Z","seq":1}`
 
 // katMAC was computed independently (Python hmac); the Zati publisher
 // carries the same vector.
-const katMAC = "da75f500496534fe91d81462736ddf8a249a1aa53acf140ddaad697c3cfbbee0"
+const katMAC = "0b33e49ce6982b61432f736d34c5e24eb9702ea7274ce3a0d32b7685e145c041"
 
 func signed(hint, mac string) []byte {
 	return []byte(`{"version":2,"hint":` + hint + `,"mac":"` + mac + `"}`)
@@ -91,19 +91,21 @@ func TestVerifyingRefusesReplays(t *testing.T) {
 	if _, ok, err := v.Read(ctx, p); ok || err != nil {
 		t.Fatalf("no hint: ok=%v err=%v", ok, err)
 	}
-	at := func(gen, ts string) string {
-		return `{"version":2,"generation":` + gen + `,"busy":true,"updated_at":"2026-11-09T00:00:` + ts + `Z"}`
+	// at(gen, seq, ts): the clock (ts) never decides order.
+	at := func(gen, seq, ts string) string {
+		return `{"version":2,"generation":` + gen + `,"busy":true,"updated_at":"2026-11-09T00:00:` + ts + `Z","seq":` + seq + `}`
 	}
 	steps := []struct {
 		hint string
 		ok   bool
 	}{
-		{at("5", "10"), true},
-		{at("5", "10"), true},  // re-read unchanged
-		{at("5", "20"), true},  // newer
-		{at("5", "15"), false}, // older within the generation
-		{at("4", "59"), false}, // older generation
-		{at("6", "00"), true},  // next boot, whatever its clock says
+		{at("5", "3", "10"), true},
+		{at("5", "3", "10"), true},  // re-read unchanged
+		{at("5", "4", "20"), true},  // newer
+		{at("5", "5", "01"), true},  // newer, after the guest clock stepped back
+		{at("5", "2", "59"), false}, // older within the generation
+		{at("4", "9", "59"), false}, // older generation
+		{at("6", "1", "00"), true},  // next boot
 	}
 	for i, s := range steps {
 		src.data = sign(key, p, s.hint)
@@ -115,7 +117,7 @@ func TestVerifyingRefusesReplays(t *testing.T) {
 			t.Fatalf("step %d: ok=%v err=%v, want ErrStale", i, ok, err)
 		}
 	}
-	src.data = []byte(at("7", "00")) // unsigned
+	src.data = []byte(at("7", "1", "00")) // unsigned
 	if _, _, err := v.Read(ctx, p); err == nil {
 		t.Fatal("an unsigned hint was accepted")
 	}
