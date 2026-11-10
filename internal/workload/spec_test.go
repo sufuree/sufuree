@@ -36,6 +36,20 @@ func TestLoadAndResolve(t *testing.T) {
 	}
 }
 
+// TestLoadProgressNeedsSignedHints: progress (the guest's rollback floor)
+// is accepted only together with a hint key, so it comes from signed hints.
+func TestLoadProgressNeedsSignedHints(t *testing.T) {
+	signed := strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"MIN","hint_key_env_key":"HK",`, 1)
+	c, err := Load(write(t, signed))
+	if err != nil || c.Workloads[0].ProgressEnvKey != "MIN" {
+		t.Fatalf("progress with a hint key: %v", err)
+	}
+	unsigned := strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"MIN",`, 1)
+	if _, err := Load(write(t, unsigned)); err == nil || !strings.Contains(err.Error(), "hint_key_env_key") {
+		t.Fatalf("progress without a hint key: %v, want a refusal naming hint_key_env_key", err)
+	}
+}
+
 func TestLoadRefuses(t *testing.T) {
 	for name, s := range map[string]string{
 		"unknown field":          strings.Replace(good, `"version":1`, `"version":1,"extra":true`, 1),
@@ -45,8 +59,9 @@ func TestLoadRefuses(t *testing.T) {
 		"bad boot file":          strings.Replace(good, `"boot_env":{`, `"boot_files":{"zati.env":"x"},"boot_env":{`, 1),
 		"no hints":               strings.Replace(good, `"wake_hints":{"endpoint":"http://127.0.0.1:8333","bucket":"b"},`, ``, 1),
 		"progress without hints": strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"progress_env_key":"MIN",`, 1),
-		"progress is generation": strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"ZATI_REPLICA_GENERATION",`, 1),
-		"progress in boot_env":   strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"K",`, 1),
+		"progress is generation": strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"HK","progress_env_key":"ZATI_REPLICA_GENERATION",`, 1),
+		"progress in boot_env":   strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"HK","progress_env_key":"K",`, 1),
+		"progress unsigned":      strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"MIN",`, 1),
 		"hint key without hints": strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_key_env_key":"HK",`, 1),
 		"hint key is generation": strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"ZATI_REPLICA_GENERATION",`, 1),
 		"hint key in boot_env":   strings.Replace(good, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"K",`, 1),
@@ -80,7 +95,7 @@ func TestBootCredentials(t *testing.T) {
 		"long":               strings.Replace(withCreds, `"15m"`, `"2h"`, 1),
 		"dup env key":        strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"AK"`, 1),
 		"env collision":      strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"K"`, 1),
-		"progress collision": strings.Replace(withCreds, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","progress_env_key":"ST",`, 1),
+		"progress collision": strings.Replace(withCreds, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"HK","progress_env_key":"ST",`, 1),
 		"hint key collision": strings.Replace(withCreds, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"ST",`, 1),
 		"gen collision":      strings.Replace(withCreds, `"session_token":"ST"`, `"session_token":"ZATI_REPLICA_GENERATION"`, 1),
 		"unknown field":      strings.Replace(withCreds, `"region":"us-west-1",`, `"region":"us-west-1","policy":"*",`, 1),
