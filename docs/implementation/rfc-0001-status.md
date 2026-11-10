@@ -13,7 +13,7 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 | Host agent | `sufuree host`: Unix sockets, journaled generations, QEMU/KVM guests, idle/scheduled wake | Multi-host enrollment, provider fence, measured wake |
 | Resources + store | Declarative App/Pool, operations, placements, hosts, claims in bbolt (`NoSync=false`), CAS on `resource_version`, Export/Import archive | Encrypted backup, crash tests on target FS |
 | Raft (one voter) | `internal/raftnode` + `internal/controlraft.Journal`: with `--raft-*`, every control `Update` proposes `restore_store` and the FSM `Import` is the only write to `control.db`; snapshots Export/Import the store. Library choice: [ADR-0001](../adr/0001-control-plane-raft-library.md) | Three voters, membership changes, unikernel footprint; typed per-op log entries (today one archive command per mutation) |
-| Executor | Describe/CreateHost/TerminateHost; volume/snapshot methods fail closed; Memory effects off by default | AWS Pulumi/Lambda worker, budgets, fences |
+| Executor | Memory + `executor.Gated` growth grant/ledger; `ec2exec` RunInstances/Terminate/Describe/Fence with ClientToken (live AWS opt-in via `--executor ec2`) | Pulumi/Lambda worker custody, durable ledger, live EC2 receipts, volume effects |
 | Demand | Join/Cancel/AcknowledgeHandoff; coalesce per resource UID | Cross-process lost-ack proofs on real host gateway |
 | Placement | Pack-first; one capacity op; minHosts=0; unknown ops reserve; warm observe/active with `reserve_mib` | Adaptive warm math, anti-affinity, cloud quiet-period proof |
 | Reconcile | Intent before dispatch; timeout → unknown; status write; ready-placement handoff bridge | Injected provider crash, budget ledger |
@@ -27,7 +27,8 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 ## Qualification still open
 
 Every gate in RFC-0001 §10 and every scenario in §11 still needs a receipt.
-Local (no-AWS) slice for Raft mutations + bootscope authorize:
-[docs/qualification/rfc-0001-local.md](../qualification/rfc-0001-local.md)
-(`go test ./internal/qual/`). In-process Memory executor is not a cloud bill;
-AWS worker gates remain open.
+Local (no-AWS) slices: Raft/bootscope
+([rfc-0001-local.md](../qualification/rfc-0001-local.md)) and grant-gated 0↔1
+(`TestLocalZeroOneZeroWithGrant`). Cloud path checklist:
+[rfc-0001-cloud-path.md](../qualification/rfc-0001-cloud-path.md).
+Live EC2 and fixed-host guest E2E remain open (authorized spend required).

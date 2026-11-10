@@ -14,12 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+
 	"github.com/sufuree/sufuree/internal/bootfloor"
+	"github.com/sufuree/sufuree/internal/budget"
 	"github.com/sufuree/sufuree/internal/controlauth"
 	"github.com/sufuree/sufuree/internal/controlraft"
 	"github.com/sufuree/sufuree/internal/demand"
 	"github.com/sufuree/sufuree/internal/edge"
 	"github.com/sufuree/sufuree/internal/executor"
+	"github.com/sufuree/sufuree/internal/executor/ec2exec"
 	"github.com/sufuree/sufuree/internal/raftnode"
 	"github.com/sufuree/sufuree/internal/reconcile"
 	"github.com/sufuree/sufuree/internal/resource"
@@ -55,7 +60,7 @@ func runController(args []string) error {
 	fs := flag.NewFlagSet("controller", flag.ContinueOnError)
 	dataDir := fs.String("data-dir", "", "durable control store directory")
 	listen := fs.String("listen", "", "control API listen address")
-	execName := fs.String("executor", "", "empty refuses effects; \"memory\" enables the in-memory executor")
+	execName := fs.String("executor", "", "empty refuses effects; \"memory\" or \"ec2\" enable mutations")
 	deployment := fs.String("deployment", "", "deployment UID written only when the store has no cluster meta")
 	tickFlag := fs.Duration("tick", time.Second, "reconcile period")
 	raftBind := fs.String("raft-bind", "", "raft transport address, for example 127.0.0.1:7000")
@@ -68,6 +73,15 @@ func runController(args []string) error {
 	tlsKey := fs.String("tls-key", "", "control API server key")
 	tlsClientCA := fs.String("tls-client-ca", "", "controller CA certificate; every caller must present a certificate it issued")
 	replicaCfg := fs.String("replica-credentials", "", "JSON config: issue each installation its own replica credentials, limited to its prefix (package replicacred)")
+	grantMaxHosts := fs.Int("grant-max-hosts", 0, "growth grant host cap; required with --executor memory|ec2 when >0 gates the ledger")
+	grantMaxMemory := fs.Int("grant-max-memory-mib", 0, "growth grant memory cap (MiB)")
+	grantExpires := fs.Duration("grant-expires", 0, "growth grant lifetime from process start; 0 means no expiry")
+	grantRevision := fs.String("grant-revision", "", "optional growth grant revision id")
+	ec2Region := fs.String("ec2-region", "", "AWS region for --executor ec2")
+	ec2AMI := fs.String("ec2-ami", "", "approved AMI for --executor ec2")
+	ec2Type := fs.String("ec2-instance-type", "", "approved instance type for --executor ec2")
+	ec2Subnet := fs.String("ec2-subnet", "", "subnet id for --executor ec2")
+	ec2SG := fs.String("ec2-security-group", "", "security group id for --executor ec2")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -99,15 +113,23 @@ func runController(args []string) error {
 		}
 		replica = svc
 	}
-	mem := &executor.Memory{}
-	switch *execName {
-	case "":
-	case "memory":
-		mem.AllowEffects = true
-	default:
-		return fmt.Errorf("unknown executor %q", *execName)
-	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	effects, err := buildExecutor(*execName, executorOpts{
+		deployment:       *deployment,
+		grantMaxHosts:    *grantMaxHosts,
+		grantMaxMemory:   *grantMaxMemory,
+		grantExpires:     *grantExpires,
+		grantRevision:    *grantRevision,
+		ec2Region:        *ec2Region,
+		ec2AMI:           *ec2AMI,
+		ec2Type:          *ec2Type,
+		ec2Subnet:        *ec2Subnet,
+		ec2SecurityGroup: *ec2SG,
+		log:              log,
+	})
+	if err != nil {
+		return err
+	}
 	tick := *tickFlag
 	if tick <= 0 {
 		tick = time.Second
@@ -176,7 +198,7 @@ func runController(args []string) error {
 		return err
 	}
 	dem := demand.New(demand.Bolt{Store: journal})
-	c := reconcile.New(journal, mem, dem, reconcile.Options{
+	c := reconcile.New(journal, effects, dem, reconcile.Options{
 		Tick: tick, Backoff: 15 * time.Second, Logger: log,
 	})
 	ln, err := net.Listen("tcp", *listen)
@@ -380,4 +402,88 @@ func reconcileWhenLeader(ctx context.Context, node *raftnode.Node, c *reconcile.
 		case <-ticker.C:
 		}
 	}
+}
+
+type executorOpts struct {
+	deployment       string
+	grantMaxHosts    int
+	grantMaxMemory   int
+	grantExpires     time.Duration
+	grantRevision    string
+	ec2Region        string
+	ec2AMI           string
+	ec2Type          string
+	ec2Subnet        string
+	ec2SecurityGroup string
+	log              *slog.Logger
+}
+
+func buildExecutor(name string, opt executorOpts) (executor.Executor, error) {
+	switch name {
+	case "":
+		return &executor.Memory{}, nil
+	case "memory":
+		inner := &executor.Memory{AllowEffects: true}
+		return gateExecutor(inner, opt)
+	case "ec2":
+		if opt.deployment == "" {
+			return nil, errors.New("--deployment is required with --executor ec2")
+		}
+		if opt.ec2Region == "" || opt.ec2AMI == "" || opt.ec2Type == "" || opt.ec2Subnet == "" || opt.ec2SecurityGroup == "" {
+			return nil, errors.New("--ec2-region, --ec2-ami, --ec2-instance-type, --ec2-subnet and --ec2-security-group are required with --executor ec2")
+		}
+		if opt.grantMaxHosts < 1 || opt.grantMaxMemory < 32 {
+			return nil, errors.New("--grant-max-hosts (>=1) and --grant-max-memory-mib (>=32) are required with --executor ec2")
+		}
+		cfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(opt.ec2Region))
+		if err != nil {
+			return nil, fmt.Errorf("ec2 config: %w", err)
+		}
+		ex, err := ec2exec.New(ec2exec.Config{
+			Client:        ec2.NewFromConfig(cfg),
+			DeploymentUID: opt.deployment,
+			AllowEffects:  true,
+			Launch: ec2exec.Launch{
+				AMI: opt.ec2AMI, InstanceType: opt.ec2Type,
+				SubnetID: opt.ec2Subnet, SecurityGroupID: opt.ec2SecurityGroup,
+				NamePrefix: "sufuree-" + opt.deployment,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		opt.log.Warn("ec2 executor enabled: real AWS RunInstances/TerminateInstances will run under the growth grant")
+		return gateExecutor(ex, opt)
+	default:
+		return nil, fmt.Errorf("unknown executor %q", name)
+	}
+}
+
+func gateExecutor(inner executor.Executor, opt executorOpts) (executor.Executor, error) {
+	if opt.grantMaxHosts < 1 && opt.grantMaxMemory < 1 {
+		// memory without an explicit grant keeps the historical uncapped path
+		if _, ok := inner.(*executor.Memory); ok {
+			return inner, nil
+		}
+		return nil, errors.New("growth grant flags are required for this executor")
+	}
+	if opt.deployment == "" {
+		return nil, errors.New("--deployment is required when a growth grant is set")
+	}
+	if opt.grantMaxHosts < 1 || opt.grantMaxMemory < 32 {
+		return nil, errors.New("--grant-max-hosts (>=1) and --grant-max-memory-mib (>=32) are required")
+	}
+	g := budget.Grant{
+		DeploymentUID: opt.deployment,
+		Revision:      opt.grantRevision,
+		MaxHosts:      opt.grantMaxHosts,
+		MaxMemoryMiB:  opt.grantMaxMemory,
+	}
+	if opt.grantExpires > 0 {
+		g.Expires = time.Now().UTC().Add(opt.grantExpires)
+	}
+	if err := g.Valid(time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return &executor.Gated{Inner: inner, Ledger: &budget.Ledger{Grant: g}}, nil
 }
