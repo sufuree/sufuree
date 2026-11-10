@@ -127,9 +127,15 @@ func runHost(args []string) error {
 				return fmt.Errorf("workload %s: hint_key_env_key needs wake_hints", w.ID)
 			}
 			id := w.ID
-			opt.HintKey, wh = key, &wakehint.Verifying{Source: src, Key: key, OnRefused: func(err error) {
-				log.Warn("refused a wake hint; using the last authentic one", "workload", id, "err", err)
-			}}
+			opt.HintKey, wh = key, &wakehint.Verifying{Source: src, Key: key,
+				Record: filepath.Join(cfg.DataDir, "hintkeys", w.ID+".last"),
+				OnRefused: func(err error) {
+					log.Warn("refused a wake hint; using the last authentic one", "workload", id, "err", err)
+				},
+				OnRecordError: func(err error) {
+					log.Warn("wake hint replay record unavailable; a restart may accept one older hint", "workload", id, "err", err)
+				},
+			}
 		}
 		act := activator.New(w, j, launcher, wh, opt)
 		gw := &gateway.Gateway{
