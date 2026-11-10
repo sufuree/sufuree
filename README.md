@@ -127,7 +127,9 @@ the agent creates a per-workload HMAC key under `data_dir/hintkeys/` (0600,
 never in the hint store), passes it in each boot env, and accepts only version-2
 envelopes whose MAC verifies for that workload's `hint_prefix`. Unsigned,
 altered, or older signed hints are refused; the agent keeps the last authentic
-hint (so deleting `wake.json` cannot force a stop) and records it in
+hint (so deleting or replacing `wake.json` cannot suppress a scheduled wake,
+and can end a busy veto only after the same bounded number of unreadable hints
+as any read error) and records it in
 `data_dir/hintkeys/<id>.last` (0600), verified again on restart, so an agent
 restart does not let an older signed hint be replayed. If that record cannot be
 read or written the agent logs it and carries on, and the next restart may accept
