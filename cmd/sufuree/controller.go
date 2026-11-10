@@ -105,9 +105,12 @@ func runController(args []string) error {
 	journal := &controlraft.Journal{Store: st}
 	var node *raftnode.Node
 	if raftOn {
+		raftDir := filepath.Join(*dataDir, "raft")
+		_, raftStat := os.Stat(raftDir)
+		raftExisted := raftStat == nil
 		var err error
 		node, err = raftnode.Open(raftnode.Config{
-			DataDir:   filepath.Join(*dataDir, "raft"),
+			DataDir:   raftDir,
 			NodeID:    *raftID,
 			BindAddr:  *raftBind,
 			Bootstrap: *raftBootstrap,
@@ -117,6 +120,9 @@ func runController(args []string) error {
 			storeOpen = false
 			if !controlExisted {
 				_ = os.Remove(controlPath)
+			}
+			if !raftExisted {
+				_ = os.RemoveAll(raftDir)
 			}
 			return err
 		}
