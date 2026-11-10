@@ -11,9 +11,12 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
 
-// caKeyPolicy lets the account administer the key (never use it) and the
+// caKeyPolicy lets the account administer the key but not use it, and the
 // operator use it only for Sufuree CA wrapping: every encrypt and decrypt
-// must carry the CA purpose in its encryption context.
+// must carry the CA purpose in its encryption context. Grants are denied
+// to everyone, so an IAM administrator can't use one to decrypt without
+// the context. PutKeyPolicy stays with the account as the audited
+// break-glass (it also prevents lockout).
 func caKeyPolicy(accountID, operatorArn string) (string, error) {
 	root := "arn:aws:iam::" + accountID + ":root"
 	doc := map[string]any{
@@ -24,12 +27,19 @@ func caKeyPolicy(accountID, operatorArn string) (string, error) {
 				"Effect":    "Allow",
 				"Principal": map[string]any{"AWS": root},
 				"Action": []string{
-					"kms:Create*", "kms:Describe*", "kms:Enable*", "kms:List*", "kms:Put*",
+					"kms:CreateAlias", "kms:Describe*", "kms:Enable*", "kms:List*", "kms:Put*",
 					"kms:Update*", "kms:Revoke*", "kms:Disable*", "kms:Get*", "kms:Delete*",
 					"kms:TagResource", "kms:UntagResource", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion",
 					"kms:RotateKeyOnDemand",
 				},
 				"Resource": "*",
+			},
+			{
+				"Sid":       "NoGrants",
+				"Effect":    "Deny",
+				"Principal": map[string]any{"AWS": "*"},
+				"Action":    []string{"kms:CreateGrant"},
+				"Resource":  "*",
 			},
 			{
 				"Sid":       "OperatorWrapsSufureeCA",

@@ -180,17 +180,22 @@ sufuree ca issue --dir ca --role host --name host-a --out host-a
 
 With `--kms-key-id`, the CA key exists on disk only as `ca.key.kms`,
 encrypted by that AWS KMS key. The encryption context binds it to the CA
-certificate, and `ca issue` decrypts it in memory only. AWS credentials and
+certificate, and `ca issue` decrypts it in memory only. The file records the
+key's ARN rather than the alias, so later issues don't depend on the alias or
+on the default region. AWS credentials and
 region come from the standard AWS environment. `infra/` declares the key
 (`alias/sufuree-ca`) with Pulumi. Its policy lets the account administer the key
-but not use it, and lets the named operator encrypt and decrypt only with the
-Sufuree CA purpose in the encryption context. Without `--kms-key-id`, the key
+but not use it, denies grants to everyone, and lets the named operator encrypt
+and decrypt only with the Sufuree CA purpose in the encryption context.
+`PutKeyPolicy` stays with the account as an audited break-glass. Without `--kms-key-id`, the key
 is a local 0600 file (development only, not for PHI). A CA whose key and
 certificate don't match is refused.
 
 With the TLS flags set, Raft peers also use mutual TLS 1.3: each controller
 presents its controller certificate (server and client authentication), and
 a peer must present one from the same CA naming a `controller` principal.
+An accepted peer has 10 seconds to complete its handshake. The TLS flags are
+all or nothing, and are checked before Raft opens.
 Without TLS flags, Raft runs over plain TCP (development only).
 
 Limits:
@@ -245,11 +250,12 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   It records the audit, starts a new incarnation, and sets the floor to the
   given mark exactly. That mark must be the restored lease's (data
   generation, TXID). The controller can't read the lease itself, so the
-  restore tooling supplies it. The new incarnation starts at the first
-  generation granted after the lowering, which is above the holding host's
-  own record. Hosts ignore hint progress from generations before it, so a
-  guest still running on the discarded data can't move the new floor, even
-  at a generation the controller never heard of. `GET /v1/installations/{id}/floor` returns the
+  restore tooling supplies it. Until the new incarnation records its first
+  progress, its start moves up to each generation granted, which is above
+  the booting host's own record and verified hints. Hosts ignore hint
+  progress from generations before it and only ever raise their copy of the
+  start. So a guest still running on the discarded data, on any host, can't
+  move the new floor once a later boot has outrun it. `GET /v1/installations/{id}/floor` returns the
   record.
 - **Raft.** Floor records live in their own bucket and are written by a
   `boot_floor` command, not by `restore_store`, so placement changes neither

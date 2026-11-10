@@ -93,8 +93,15 @@ func TestAdoptControllerGrants(t *testing.T) {
 	if _, err := j.Adopt("w", Grant{Generation: 4, Incarnation: 1}); !errors.Is(err, ErrNewerLocalIncarnation) {
 		t.Fatalf("an older incarnation: %v", err)
 	}
+	// In the same incarnation the start only moves up.
+	if r, err = j.Adopt("w", Grant{Generation: 5, Incarnation: 2, IncarnationFrom: 5, Epoch: 1, Seq: 1}); err != nil || r.IncarnationFrom != 5 {
+		t.Fatalf("a moved incarnation start: %+v, %v", r, err)
+	}
+	if r, err = j.Adopt("w", Grant{Generation: 6, Incarnation: 2, IncarnationFrom: 4, Epoch: 1, Seq: 1}); err != nil || r.IncarnationFrom != 5 {
+		t.Fatalf("an incarnation start moved down: %+v, %v", r, err)
+	}
 	j2, _ := Open(j.dir) // durable across restarts
-	if r, err := j2.Get("w"); err != nil || r.Generation != 3 || r.Incarnation != 2 {
+	if r, err := j2.Get("w"); err != nil || r.Generation != 6 || r.Incarnation != 2 {
 		t.Fatalf("after restart: %+v, %v", r, err)
 	}
 	// Progress keeps the version 3 record at version 3.

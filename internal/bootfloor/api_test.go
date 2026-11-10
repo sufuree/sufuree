@@ -149,7 +149,7 @@ func exercise(t *testing.T, st *store.Store, j bootfloor.Committer) {
 		t.Fatalf("lowering: %d %s", code, body)
 	}
 	f := floorOf(t, st)
-	if f.Incarnation != 2 || !f.StartPending() || f.ProgressEpoch != 51 || f.ProgressSeq != 1 || f.Lowered == nil || !f.Lowered.At.Equal(t0) {
+	if f.Incarnation != 2 || !f.StartOpen || f.ProgressEpoch != 51 || f.ProgressSeq != 1 || f.Lowered == nil || !f.Lowered.At.Equal(t0) {
 		t.Fatalf("after lowering = %+v", f)
 	}
 	// A host that missed the rollback cannot raise the floor back.

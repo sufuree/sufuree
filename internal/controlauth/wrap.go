@@ -17,9 +17,10 @@ import (
 // for CA secrets). The context is bound into the ciphertext: unwrapping
 // needs the same context.
 type KeyWrapper interface {
-	Wrap(ctx context.Context, plaintext []byte, context map[string]string) ([]byte, error)
+	// Wrap returns the ciphertext and the exact key that wrapped it (an
+	// ARN, not an alias), which Unwrap is later pinned to.
+	Wrap(ctx context.Context, plaintext []byte, context map[string]string) (ciphertext []byte, keyID string, err error)
 	Unwrap(ctx context.Context, ciphertext []byte, context map[string]string) ([]byte, error)
-	KeyID() string
 }
 
 // caKeyWrappedFile holds the wrapped CA key.
@@ -51,16 +52,16 @@ type KMSWrapper struct {
 	Key    string // key ID, ARN or alias
 }
 
-// KeyID implements KeyWrapper.
-func (w *KMSWrapper) KeyID() string { return w.Key }
-
 // Wrap implements KeyWrapper.
-func (w *KMSWrapper) Wrap(ctx context.Context, plaintext []byte, ec map[string]string) ([]byte, error) {
+func (w *KMSWrapper) Wrap(ctx context.Context, plaintext []byte, ec map[string]string) ([]byte, string, error) {
 	out, err := w.Client.Encrypt(ctx, &kms.EncryptInput{KeyId: aws.String(w.Key), Plaintext: plaintext, EncryptionContext: ec})
 	if err != nil {
-		return nil, fmt.Errorf("controlauth: kms encrypt: %w", err)
+		return nil, "", fmt.Errorf("controlauth: kms encrypt: %w", err)
 	}
-	return out.CiphertextBlob, nil
+	if aws.ToString(out.KeyId) == "" {
+		return nil, "", errors.New("controlauth: kms encrypt returned no key ID")
+	}
+	return out.CiphertextBlob, aws.ToString(out.KeyId), nil
 }
 
 // Unwrap implements KeyWrapper. The key ID is pinned, so a ciphertext
