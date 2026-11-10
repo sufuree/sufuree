@@ -235,3 +235,35 @@ func TestBootSendsTheVerifiedHintGeneration(t *testing.T) {
 		t.Fatalf("the boot request did not carry the hint's generation: %+v", f.locals[0])
 	}
 }
+
+// TestBootSendsProgressTheExitReadMissed: when the read after a guest's exit
+// fails, the next boot reads the hint before asking for a generation, so the
+// record sent to the controller carries that guest's final progress (with
+// an open incarnation start, a later read could fall below the moved start).
+func TestBootSendsProgressTheExitReadMissed(t *testing.T) {
+	l, h, f := &fakeLauncher{}, &fakeHints{}, &fakeFloor{inc: 1}
+	a, _ := newFloorAct(t, l, h, f)
+	if _, _, err := wakeAndStop(t, a, l); err != nil { // generation 1
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.err = errors.New("store unavailable") // the exit-time read is missed
+	h.mu.Unlock()
+	if _, _, err := wakeAndStop(t, a, l); err != nil { // generation 2
+		t.Fatal(err)
+	}
+	// Generation 2's guest published progress the agent hasn't read yet.
+	h.mu.Lock()
+	h.err = nil
+	h.mu.Unlock()
+	h.set(wakehint.Hint{Version: 1, Generation: 2, Progress: &wakehint.Progress{Epoch: 2, Seq: 7}})
+	if _, _, err := wakeAndStop(t, a, l); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last := f.locals[len(f.locals)-1]
+	if last.Epoch != 2 || last.Seq != 7 {
+		t.Fatalf("boot sent %+v, want the unread progress 2:7", last)
+	}
+}

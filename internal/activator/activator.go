@@ -284,6 +284,11 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 }
 
 func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
+	// Read the hint before the generation is issued: the record sent to
+	// the controller then carries the last guest's final progress, even
+	// when the read right after its exit failed. With a floor incarnation
+	// still open, a later read could fall below a start this boot moves.
+	a.readProgress()
 	gen, err := a.issueGeneration() // durable before boot
 	if err != nil {
 		return nil, 0, fmt.Errorf("issue generation: %w", err)
@@ -504,18 +509,26 @@ func (a *Activator) noteProgress(h wakehint.Hint) error {
 	return err
 }
 
-// progressEnv sets the progress key from a fresh hint read and the journal.
-// An unreadable hint does not block the wake: the journal still holds the
-// last progress seen.
-func (a *Activator) progressEnv(env map[string]string) error {
+// readProgress records the hint's progress before a boot. An unreadable
+// hint does not block the wake: the journal still holds the last progress
+// seen.
+func (a *Activator) readProgress() {
 	if a.spec.ProgressEnvKey == "" {
-		return nil
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ProgressReadTimeout)
 	err := a.recordProgress(ctx)
 	cancel()
 	if err != nil {
 		a.log.Warn("hint unreadable before boot; using recorded progress", "err", err)
+	}
+}
+
+// progressEnv sets the progress key from the journal, after the grant
+// (which may have started a new incarnation) was adopted.
+func (a *Activator) progressEnv(env map[string]string) error {
+	if a.spec.ProgressEnvKey == "" {
+		return nil
 	}
 	r, err := a.journal.Get(a.spec.ID)
 	if err != nil {
