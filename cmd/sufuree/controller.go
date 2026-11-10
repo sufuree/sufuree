@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sufuree/sufuree/internal/controlraft"
 	"github.com/sufuree/sufuree/internal/demand"
 	"github.com/sufuree/sufuree/internal/edge"
 	"github.com/sufuree/sufuree/internal/executor"
@@ -25,11 +26,13 @@ import (
 
 // ensureDeployment records an operator-supplied deployment id the first time.
 // It does not invent an id and does not change a deployment that is already stored.
-func ensureDeployment(st *store.Store, id string) error {
+func ensureDeployment(db interface {
+	Update(func(*store.Tx) error) error
+}, id string) error {
 	if id == "" {
 		return nil
 	}
-	return st.Update(func(tx *store.Tx) error {
+	return db.Update(func(tx *store.Tx) error {
 		old, err := tx.GetMeta()
 		if errors.Is(err, store.ErrNotFound) {
 			return tx.PutMeta(resource.ClusterMeta{
@@ -81,10 +84,25 @@ func runController(args []string) error {
 	if tick <= 0 {
 		tick = time.Second
 	}
-	// Raft is opened before the record file so a missing cluster does not
-	// create either one. The FSM does not write the record file: those writes
-	// stay on the leader's local bbolt store. Putting them in the log is the
-	// later step that lets a second voter replay them.
+	// Open the record file so the Raft FSM can Import/Export it. With Raft
+	// enabled, Journal.Update proposes restore_store; the FSM Import is the
+	// only write to control.db. Without Raft, Journal writes the store
+	// directly. If Raft open fails and this process created control.db, remove
+	// it so a bad flag combination leaves no partial cluster.
+	controlPath := filepath.Join(*dataDir, "control.db")
+	_, statErr := os.Stat(controlPath)
+	controlExisted := statErr == nil
+	st, err := store.Open(controlPath)
+	if err != nil {
+		return err
+	}
+	storeOpen := true
+	defer func() {
+		if storeOpen {
+			_ = st.Close()
+		}
+	}()
+	journal := &controlraft.Journal{Store: st}
 	var node *raftnode.Node
 	if raftOn {
 		var err error
@@ -93,32 +111,27 @@ func runController(args []string) error {
 			NodeID:    *raftID,
 			BindAddr:  *raftBind,
 			Bootstrap: *raftBootstrap,
-		}, &raftnode.CommandFSM{
-			ApplyFn: func(op string, _ []byte) error {
-				return fmt.Errorf("raftnode: command %q is not a local store write", op)
-			},
-		})
+		}, controlraft.StoreFSM(st))
 		if err != nil {
+			_ = st.Close()
+			storeOpen = false
+			if !controlExisted {
+				_ = os.Remove(controlPath)
+			}
 			return err
 		}
 		defer node.Close()
-	}
-	st, err := store.Open(filepath.Join(*dataDir, "control.db"))
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	if node != nil {
+		journal.Node = node
 		if err := waitLeader(node, 20*time.Second); err != nil {
 			return err
 		}
 		log.Info("raft", "id", *raftID, "bind", *raftBind, "bootstrap", *raftBootstrap)
 	}
-	if err := ensureDeployment(st, *deployment); err != nil {
+	if err := ensureDeployment(journal, *deployment); err != nil {
 		return err
 	}
-	dem := demand.New(demand.Bolt{Store: st})
-	c := reconcile.New(st, mem, dem, reconcile.Options{
+	dem := demand.New(demand.Bolt{Store: journal})
+	c := reconcile.New(journal, mem, dem, reconcile.Options{
 		Tick: tick, Backoff: 15 * time.Second, Logger: log,
 	})
 	ln, err := net.Listen("tcp", *listen)

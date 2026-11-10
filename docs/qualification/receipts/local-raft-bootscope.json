@@ -1,0 +1,9 @@
+{
+  "aws_spend": false,
+  "host": "h302391916edde60f",
+  "installation": "ra89f2fd80232bf9a",
+  "qualified_at": "2026-11-09T21:17:42Z",
+  "raft": true,
+  "replica_tag": "inst/ra89f2fd80232bf9a",
+  "scenario": "local-raft-mutations-bootscope"
+}
