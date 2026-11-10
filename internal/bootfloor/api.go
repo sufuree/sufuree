@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/sufuree/sufuree/internal/bootscope"
@@ -64,6 +65,23 @@ type LowerRequest = Lowering
 // The host ID in these paths is not authenticated yet; see the package
 // README note in docs. Mount only with the controller's boot-floor flag.
 func Register(mux *http.ServeMux, j Committer, now func() time.Time) {
+	RegisterWithIdentity(mux, j, now, nil)
+}
+
+// Identify returns the authenticated principal of a request.
+type Identify func(*http.Request) (string, bool)
+
+// RegisterWithIdentity is Register for an authenticated control API. With
+// identify set, the single-call lowering (whose names are only asserted) is
+// not served; instead:
+//
+//	POST /v1/installations/{installation}/floor/lower-request  (product client, for an owner)
+//	POST /v1/installations/{installation}/floor/lower-approve  (a different principal)
+//
+// The request records its authenticated principal and the owner it acts
+// for; the approval records its own principal and must repeat the
+// request's incarnations, mark and reference.
+func RegisterWithIdentity(mux *http.ServeMux, j Committer, now func() time.Time, identify Identify) {
 	if now == nil {
 		now = time.Now
 	}
@@ -86,9 +104,96 @@ func Register(mux *http.ServeMux, j Committer, now func() time.Time) {
 		}
 		writeJSON(w, http.StatusOK, f)
 	})
-	mux.HandleFunc("POST /v1/installations/{installation}/floor/lower", func(w http.ResponseWriter, r *http.Request) {
-		postLower(j, now, w, r)
+	if identify == nil {
+		mux.HandleFunc("POST /v1/installations/{installation}/floor/lower", func(w http.ResponseWriter, r *http.Request) {
+			postLower(j, now, w, r)
+		})
+		return
+	}
+	mux.HandleFunc("POST /v1/installations/{installation}/floor/lower-request", func(w http.ResponseWriter, r *http.Request) {
+		who, ok := identify(r)
+		if !ok {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		var req LowerRequestBody
+		if err := readBody(r, 1<<14, &req); err != nil {
+			http.Error(w, "lower request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !ownerPattern.MatchString(req.Owner) {
+			http.Error(w, "lower request: owner is required (the installation owner the product client authenticated)", http.StatusBadRequest)
+			return
+		}
+		l := Lowering{ExpectIncarnation: req.ExpectIncarnation, TargetIncarnation: req.TargetIncarnation,
+			Epoch: req.Epoch, Seq: req.Seq, Reason: req.Reason, Reference: req.Reference,
+			RequestedBy: who + " for owner " + req.Owner, At: now().UTC()}
+		commitLowering(j, w, r.PathValue("installation"), KindRequestLower, l, PlanRequestLower)
 	})
+	mux.HandleFunc("POST /v1/installations/{installation}/floor/lower-approve", func(w http.ResponseWriter, r *http.Request) {
+		who, ok := identify(r)
+		if !ok {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+		var req ApproveBody
+		if err := readBody(r, 1<<14, &req); err != nil {
+			http.Error(w, "lower approval: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		l := Lowering{ExpectIncarnation: req.ExpectIncarnation, TargetIncarnation: req.TargetIncarnation,
+			Epoch: req.Epoch, Seq: req.Seq, Reference: req.Reference, ApprovedBy: who, At: now().UTC()}
+		commitLowering(j, w, r.PathValue("installation"), KindApproveLower, l, PlanApproveLower)
+	})
+}
+
+var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.@_:-]{0,255}$`)
+
+// LowerRequestBody is a product client's lowering request.
+type LowerRequestBody struct {
+	Owner             string `json:"owner"`
+	ExpectIncarnation uint64 `json:"expect_incarnation"`
+	TargetIncarnation uint64 `json:"target_incarnation,omitempty"`
+	Epoch             uint64 `json:"epoch"`
+	Seq               uint64 `json:"seq"`
+	Reason            string `json:"reason"`
+	Reference         string `json:"reference"`
+}
+
+// ApproveBody repeats the request being approved.
+type ApproveBody struct {
+	ExpectIncarnation uint64 `json:"expect_incarnation"`
+	TargetIncarnation uint64 `json:"target_incarnation,omitempty"`
+	Epoch             uint64 `json:"epoch"`
+	Seq               uint64 `json:"seq"`
+	Reference         string `json:"reference"`
+}
+
+func commitLowering(j Committer, w http.ResponseWriter, inst, kind string, l Lowering,
+	plan func(resource.BootFloor, Lowering) (resource.BootFloor, error)) {
+	var out resource.BootFloor
+	err := j.Commit(func(tx *store.Tx) ([]byte, error) {
+		meta, err := tx.GetMeta()
+		if err != nil {
+			return nil, err
+		}
+		rec, err := getFloor(tx, inst)
+		if err != nil {
+			return nil, err
+		}
+		if rec == nil {
+			return nil, ErrNotFound
+		}
+		if out, err = plan(*rec, l); err != nil {
+			return nil, err
+		}
+		return Encode(Command{Kind: kind, OwnerEpoch: meta.OwnerEpoch, Installation: inst, Lower: &l})
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func readBody(r *http.Request, limit int64, v any) error {
@@ -270,7 +375,7 @@ func writeErr(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, ErrConflict), errors.Is(err, ErrStaleEpoch), errors.Is(err, ErrBehindHost):
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrStaleEpoch), errors.Is(err, ErrBehindHost), errors.Is(err, ErrNoMatchingRequest):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, raftnode.ErrNotLeader):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)

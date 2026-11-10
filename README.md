@@ -154,6 +154,38 @@ That host-local journal is for development and single-host use only: it is
 lost with the host, and a replacement host starts generations at 1 with no
 floor.
 
+### Control API authentication
+
+`sufuree controller --tls-cert --tls-key --tls-client-ca` serves the control
+API over TLS 1.3 and requires every caller to present a certificate from the
+controller CA. Each certificate names one principal as a URI SAN,
+`sufuree://<role>/<name>`. A default-deny route policy decides what each role
+may call:
+
+| Role | May call |
+| --- | --- |
+| `host` | Only its own `/v1/hosts/{id}/assignments`, `credentials`, `boot` and `progress` |
+| `operator` | Resources, hosts, operations, warm, floor reads and lowering approvals |
+| `product-client` | Resources, floor reads and lowering requests, on behalf of owners it authenticated (customer identity stays with the product) |
+| `controller` | Nothing (server certificate only) |
+
+Hosts and the `app` commands take `--tls-cert`, `--tls-key` and `--tls-ca`
+with an `https://` controller URL.
+
+```
+sufuree ca init --dir ca
+sufuree ca issue --dir ca --role controller --name control --server-name ctl.internal --out controller
+sufuree ca issue --dir ca --role host --name host-a --out host-a
+```
+
+Limits:
+- **CA key custody.** The CA key is a local 0600 file. RFC-0001 KMS custody is
+  required before PHI.
+- **No revocation.** There is no revocation list. Certificates default to 30
+  days, and a compromised one is contained by rotating the CA.
+- **Raft peers.** The Raft transport between controller peers is not
+  authenticated by this change.
+
 ### Boot generations and floors on the controller
 
 With `sufuree controller --boot-floor` and `sufuree host --controller URL
@@ -204,12 +236,16 @@ A), so both survive the loss of any host. Production PHI workloads need this.
 - **Raft.** Floor records live in their own bucket and are written by a
   `boot_floor` command, not by `restore_store`, so placement changes neither
   ship nor overwrite them. Raft snapshots carry both.
-- **Not yet safe for PHI.** The control API doesn't authenticate hosts or
-  people: the host ID in the path is taken on trust, and `requested_by` and
-  `approved_by` are only checked to be different names. Anyone who can reach the API could
-  raise a floor (stalling boots) or use up generations. Host authentication is
-  the next change. Until it lands, both flags are off by default and the
-  controller logs a warning.
+- **Authentication.** Without TLS flags the control API takes host IDs and
+  lowering names on trust (development only). With mutual TLS (below), hosts
+  can call only their own `/v1/hosts/{id}/...` routes, and a floor lowering
+  takes two calls by two principals:
+  1. `POST /v1/installations/{id}/floor/lower-request` from a product client,
+     naming the `owner` it authenticated.
+  2. `POST /v1/installations/{id}/floor/lower-approve` from an operator,
+     repeating the request's incarnations, mark and reference.
+
+  The audit records both principals.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.
