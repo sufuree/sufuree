@@ -149,7 +149,7 @@ func exercise(t *testing.T, st *store.Store, j bootfloor.Committer) {
 		t.Fatalf("lowering: %d %s", code, body)
 	}
 	f := floorOf(t, st)
-	if f.Incarnation != 2 || f.IncarnationFrom != 53 || f.ProgressEpoch != 51 || f.ProgressSeq != 1 || f.Lowered == nil || !f.Lowered.At.Equal(t0) {
+	if f.Incarnation != 2 || !f.StartPending() || f.ProgressEpoch != 51 || f.ProgressSeq != 1 || f.Lowered == nil || !f.Lowered.At.Equal(t0) {
 		t.Fatalf("after lowering = %+v", f)
 	}
 	// A host that missed the rollback cannot raise the floor back.
@@ -160,8 +160,10 @@ func exercise(t *testing.T, st *store.Store, j bootfloor.Committer) {
 		t.Fatalf("an old-incarnation report moved the floor: %+v", f)
 	}
 	// Its next boot gets the new incarnation and the lowered floor.
-	g, err = a.Boot(ctx, "inst-1", bootfloor.Entry{Incarnation: 1, Generation: 52, Epoch: 52, Seq: 9})
-	if err != nil || g.Generation != 53 || g.Incarnation != 2 || g.IncarnationFrom != 53 || g.ProgressEpoch != 51 || g.ProgressSeq != 1 {
+	// Its own record is past what the controller saw (55): the new
+	// incarnation starts above it, so that guest's hints are discarded.
+	g, err = a.Boot(ctx, "inst-1", bootfloor.Entry{Incarnation: 1, Generation: 55, Epoch: 54, Seq: 9})
+	if err != nil || g.Generation != 56 || g.Incarnation != 2 || g.IncarnationFrom != 56 || g.ProgressEpoch != 51 || g.ProgressSeq != 1 {
 		t.Fatalf("grant after lowering = %+v, %v", g, err)
 	}
 	// A host with a newer incarnation (the controller restored behind a

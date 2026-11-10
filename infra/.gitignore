@@ -1,0 +1,2 @@
+# Stack config names account principals; set it with `pulumi config set`.
+Pulumi.*.yaml

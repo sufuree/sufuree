@@ -23,7 +23,12 @@ type BootFloor struct {
 	Incarnation  uint64 `json:"incarnation"`
 	// IncarnationFrom is the first generation issued in this incarnation
 	// (zero for the first incarnation). Progress from a hint published by
-	// an earlier generation belongs to data a lowering discarded.
+	// an earlier generation belongs to data a lowering discarded. A
+	// lowering leaves it zero (StartPending) and the next allocation sets
+	// it to the H it issues: that H is above the holding host's own record,
+	// so a guest still running on discarded data, at a generation the
+	// controller never heard of, cannot publish a hint inside the new
+	// incarnation.
 	IncarnationFrom uint64         `json:"incarnation_from,omitempty"`
 	ProgressEpoch   uint64         `json:"progress_epoch,omitempty"`
 	ProgressSeq     uint64         `json:"progress_seq,omitempty"`
@@ -151,3 +156,7 @@ func (l FloorLowering) Validate() error {
 	}
 	return nil
 }
+
+// StartPending reports whether the record's incarnation began with a
+// lowering and no generation has been issued in it yet.
+func (f BootFloor) StartPending() bool { return f.Incarnation > 1 && f.IncarnationFrom == 0 }

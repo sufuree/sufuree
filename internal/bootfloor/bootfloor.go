@@ -223,6 +223,9 @@ func PlanAllocate(rec *resource.BootFloor, c Command) (resource.BootFloor, Outco
 		return resource.BootFloor{}, Unchanged, errors.New("bootfloor: generation exhausted")
 	}
 	out.Generation++
+	if out.StartPending() {
+		out.IncarnationFrom = out.Generation
+	}
 	return out, o, out.Validate()
 }
 
@@ -250,7 +253,7 @@ func PlanLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 	}
 	out := rec
 	out.Incarnation = target
-	out.IncarnationFrom = rec.Generation + 1
+	out.IncarnationFrom = 0 // StartPending: set by the next allocation
 	out.ProgressEpoch, out.ProgressSeq = l.Epoch, l.Seq
 	out.Lowered = &audit
 	out.Pending = nil

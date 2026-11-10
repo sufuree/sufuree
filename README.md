@@ -167,24 +167,35 @@ may call:
 | `host` | Only its own `/v1/hosts/{id}/assignments`, `credentials`, `boot` and `progress` |
 | `operator` | Resources, hosts, operations, warm, floor reads and lowering approvals |
 | `product-client` | Resources, floor reads and lowering requests, on behalf of owners it authenticated (customer identity stays with the product) |
-| `controller` | Nothing (server certificate only) |
+| `controller` | Nothing on the control API (its server certificate and its Raft peer identity) |
 
 Hosts and the `app` commands take `--tls-cert`, `--tls-key` and `--tls-ca`
 with an `https://` controller URL.
 
 ```
-sufuree ca init --dir ca
+sufuree ca init --dir ca --kms-key-id alias/sufuree-ca
 sufuree ca issue --dir ca --role controller --name control --server-name ctl.internal --out controller
 sufuree ca issue --dir ca --role host --name host-a --out host-a
 ```
 
+With `--kms-key-id`, the CA key exists on disk only as `ca.key.kms`,
+encrypted by that AWS KMS key. The encryption context binds it to the CA
+certificate, and `ca issue` decrypts it in memory only. AWS credentials and
+region come from the standard AWS environment. `infra/` declares the key
+(`alias/sufuree-ca`) with Pulumi. Its policy lets the account administer the key
+but not use it, and lets the named operator encrypt and decrypt only with the
+Sufuree CA purpose in the encryption context. Without `--kms-key-id`, the key
+is a local 0600 file (development only, not for PHI). A CA whose key and
+certificate don't match is refused.
+
+With the TLS flags set, Raft peers also use mutual TLS 1.3: each controller
+presents its controller certificate (server and client authentication), and
+a peer must present one from the same CA naming a `controller` principal.
+Without TLS flags, Raft runs over plain TCP (development only).
+
 Limits:
-- **CA key custody.** The CA key is a local 0600 file. RFC-0001 KMS custody is
-  required before PHI.
 - **No revocation.** There is no revocation list. Certificates default to 30
   days, and a compromised one is contained by rotating the CA.
-- **Raft peers.** The Raft transport between controller peers is not
-  authenticated by this change.
 - **Product-client scope.** Any `product-client` may manage any resource and
   request any lowering. Each product client must be scoped to its own
   resources before a second product client exists.
@@ -234,8 +245,11 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   It records the audit, starts a new incarnation, and sets the floor to the
   given mark exactly. That mark must be the restored lease's (data
   generation, TXID). The controller can't read the lease itself, so the
-  restore tooling supplies it. Hosts ignore hint progress from generations
-  before the new incarnation. `GET /v1/installations/{id}/floor` returns the
+  restore tooling supplies it. The new incarnation starts at the first
+  generation granted after the lowering, which is above the holding host's
+  own record. Hosts ignore hint progress from generations before it, so a
+  guest still running on the discarded data can't move the new floor, even
+  at a generation the controller never heard of. `GET /v1/installations/{id}/floor` returns the
   record.
 - **Raft.** Floor records live in their own bucket and are written by a
   `boot_floor` command, not by `restore_store`, so placement changes neither

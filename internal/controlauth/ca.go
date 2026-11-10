@@ -11,16 +11,20 @@
 //   - product-client: a product such as Zati acting for its own
 //     authenticated customers; manages its resources and requests floor
 //     lowerings on an owner's behalf. Customer identity stays with it.
-//   - controller: the control API's own server certificate; never a client.
+//   - controller: a controller's certificate: the control API's server
+//     certificate and its Raft peer identity; never a control API caller.
 //
-// The CA key is a local file in this version (created by `sufuree ca
-// init`, mode 0600), for development and local qualification. RFC-0001's
-// KMS-wrapped custody is required before PHI. There is no revocation list
-// yet: certificates are short-lived (default 30 days) and a compromised one
-// is contained by rotating the CA.
+// CA key custody: with an AWS KMS key (`sufuree ca init --kms-key-id`),
+// the key exists on disk only wrapped by KMS (ca.key.kms), bound to the CA
+// certificate by the encryption context, and is unwrapped in memory only
+// to issue (RFC-0001 envelope custody; required for PHI). Without one, it
+// is a local 0600 file, for development and local qualification. There is
+// no revocation list yet: certificates are short-lived (default 30 days)
+// and a compromised one is contained by rotating the CA.
 package controlauth
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -116,18 +120,28 @@ type CA struct {
 	PEM  []byte
 }
 
-// InitCA creates a new CA in dir (0700) and refuses to replace one.
+// InitCA creates a new CA in dir (0700) with its key in a local 0600 file
+// (development and local qualification only) and refuses to replace one.
 func InitCA(dir string, validFor time.Duration) error {
+	return InitCAWrapped(context.Background(), dir, validFor, nil)
+}
+
+// InitCAWrapped creates a new CA in dir. With a wrapper, the key is stored
+// only encrypted (ca.key.kms), bound to the CA certificate; it never
+// touches the disk in plaintext.
+func InitCAWrapped(ctx context.Context, dir string, validFor time.Duration, w KeyWrapper) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(filepath.Join(dir, caKeyFile)); err == nil {
-		return errors.New("controlauth: a CA already exists here; refusing to replace it")
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
+	for _, f := range []string{caKeyFile, caKeyWrappedFile} {
+		if _, err := os.Lstat(filepath.Join(dir, f)); err == nil {
+			return errors.New("controlauth: a CA already exists here; refusing to replace it")
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -163,23 +177,68 @@ func InitCA(dir string, validFor time.Duration) error {
 	if err := writeExclusive(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return err
 	}
-	return writeExclusive(filepath.Join(dir, caKeyFile), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	if w == nil {
+		return writeExclusive(filepath.Join(dir, caKeyFile), keyPEM, 0o600)
+	}
+	ct, err := w.Wrap(ctx, keyPEM, wrapContext(der))
+	if err != nil {
+		return err
+	}
+	blob, err := encodeWrapped(w.KeyID(), ct)
+	if err != nil {
+		return err
+	}
+	return writeExclusive(filepath.Join(dir, caKeyWrappedFile), blob, 0o600)
 }
 
-// LoadCA reads a CA directory. The key must be readable only by its owner.
+// LoadCA reads a CA directory whose key is a local file. The key must be
+// readable only by its owner.
 func LoadCA(dir string) (*CA, error) {
+	return LoadCAWrapped(context.Background(), dir, nil)
+}
+
+// Wrapped reports whether dir's CA key is KMS-wrapped.
+func Wrapped(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, caKeyWrappedFile))
+	return err == nil
+}
+
+// LoadCAWrapped reads a CA directory, unwrapping a wrapped key with w. A
+// wrapped key needs w; a plaintext key is refused when w is set, so a
+// custody downgrade is not silent. The key must match the certificate.
+func LoadCAWrapped(ctx context.Context, dir string, w KeyWrapper) (*CA, error) {
 	certPEM, err := os.ReadFile(filepath.Join(dir, caCertFile))
-	if err != nil {
-		return nil, err
-	}
-	keyPath := filepath.Join(dir, caKeyFile)
-	keyPEM, err := readPrivate(keyPath)
 	if err != nil {
 		return nil, err
 	}
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		return nil, err
+	}
+	var keyPEM []byte
+	if Wrapped(dir) {
+		if w == nil {
+			return nil, errors.New("controlauth: the CA key is KMS-wrapped; a KMS key is required")
+		}
+		blob, err := readPrivate(filepath.Join(dir, caKeyWrappedFile))
+		if err != nil {
+			return nil, err
+		}
+		wk, err := decodeWrapped(blob)
+		if err != nil {
+			return nil, err
+		}
+		if keyPEM, err = w.Unwrap(ctx, wk.Ciphertext, wrapContext(cert.Raw)); err != nil {
+			return nil, err
+		}
+	} else {
+		if w != nil {
+			return nil, errors.New("controlauth: a KMS key was given but the CA key is a plaintext file")
+		}
+		if keyPEM, err = readPrivate(filepath.Join(dir, caKeyFile)); err != nil {
+			return nil, err
+		}
 	}
 	kb, _ := pem.Decode(keyPEM)
 	if kb == nil {
@@ -192,6 +251,9 @@ func LoadCA(dir string) (*CA, error) {
 	signer, ok := k.(crypto.Signer)
 	if !ok {
 		return nil, errors.New("controlauth: CA key cannot sign")
+	}
+	if pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool }); !ok || !pub.Equal(cert.PublicKey) {
+		return nil, errors.New("controlauth: the CA key does not match the CA certificate")
 	}
 	return &CA{Cert: cert, Key: signer, PEM: certPEM}, nil
 }
@@ -233,7 +295,9 @@ func (ca *CA) Issue(p Principal, validFor time.Duration, serverNames []string) (
 		URIs:         []*url.URL{p.URI()},
 	}
 	if p.Role == RoleController {
-		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		// Server auth for the control API; client auth too, for Raft peers
+		// (the control API middleware still refuses this role as a caller).
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 		for _, n := range serverNames {
 			if ip := net.ParseIP(n); ip != nil {
 				tmpl.IPAddresses = append(tmpl.IPAddresses, ip)

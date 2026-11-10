@@ -78,11 +78,20 @@ func TestPlanLower(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Incarnation != 2 || out.IncarnationFrom != 21 || out.ProgressEpoch != 6 || out.ProgressSeq != 2 || out.Generation != 20 {
+	if out.Incarnation != 2 || !out.StartPending() || out.ProgressEpoch != 6 || out.ProgressSeq != 2 || out.Generation != 20 {
 		t.Fatalf("lowered = %+v", out)
 	}
 	if l := out.Lowered; l == nil || l.FromIncarnation != 1 || l.FromEpoch != 19 || l.FromSeq != 8 {
 		t.Fatalf("audit = %+v", out.Lowered)
+	}
+	// The new incarnation starts at the first H allocated after it, above
+	// the holding host's record (a guest on the discarded data may have
+	// gone past what the controller saw).
+	c := Command{Kind: KindAllocate, Installation: "inst-1", Expect: 20, Local: &Entry{Incarnation: 1, Generation: 27, Epoch: 26, Seq: 1}}
+	if g, _, err := PlanAllocate(&out, c); err != nil || g.Incarnation != 2 || g.Generation != 28 || g.IncarnationFrom != 28 || g.ProgressEpoch != 6 {
+		t.Fatalf("first allocation after lowering = %+v, %v", g, err)
+	} else if g2, _, err := PlanAllocate(&g, Command{Kind: KindAllocate, Installation: "inst-1", Expect: 28}); err != nil || g2.IncarnationFrom != 28 {
+		t.Fatalf("a later allocation moved the incarnation start: %+v, %v", g2, err)
 	}
 	if _, err := PlanLower(r, lowering("owner@example.com", "Owner@example.com")); err == nil {
 		t.Fatal("one person both requested and approved a lowering")
