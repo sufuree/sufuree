@@ -533,6 +533,7 @@ func TestBootCarriesTheHighestProgressSeen(t *testing.T) {
 	if env := wake(); env["MIN"] != "" {
 		t.Fatalf("first boot got progress %q before any was reported", env["MIN"])
 	}
+	wake() // issue generation 2: the hint is read before the next is issued
 	for _, c := range []struct {
 		p    *wakehint.Progress
 		want string
