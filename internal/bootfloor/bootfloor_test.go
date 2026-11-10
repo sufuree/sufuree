@@ -29,8 +29,11 @@ func TestMerge(t *testing.T) {
 		{"same incarnation: higher floor", rec(10, 1, 9, 3), entry(1, 9, 9, 4), *rec(10, 1, 9, 4), Raised},
 		{"same incarnation: nothing new", rec(10, 1, 9, 3), entry(1, 10, 9, 3), *rec(10, 1, 9, 3), Unchanged},
 		{"host 0 is incarnation 1", rec(10, 1, 9, 3), entry(0, 11, 9, 3), *rec(11, 1, 9, 3), Raised},
-		{"older incarnation dropped, even if higher", rec(10, 2, 5, 1), entry(1, 90, 80, 9), *rec(10, 2, 5, 1), Unchanged},
-		{"newer incarnation rebuilds, H never lowers", rec(30, 1, 29, 9), entry(2, 20, 15, 1), *rec(30, 2, 15, 1), Rebuilt},
+		{"older incarnation: floor dropped, H still taken", rec(10, 2, 5, 1), entry(1, 90, 80, 9), *rec(90, 2, 5, 1), Raised},
+		{"older incarnation, nothing new", rec(10, 2, 5, 1), entry(1, 9, 8, 9), *rec(10, 2, 5, 1), Unchanged},
+		{"newer incarnation never lowers the floor", rec(30, 1, 29, 9), entry(2, 20, 0, 0), *rec(30, 1, 29, 9), Ahead},
+		{"newer incarnation: only H is taken", rec(30, 1, 29, 9), entry(2, 40, 0, 0), *rec(40, 1, 29, 9), Ahead},
+		{"a generation past the bound is ignored", rec(30, 1, 29, 9), entry(1, MaxGeneration+1, MaxGeneration, 1), *rec(30, 1, 29, 9), Unchanged},
 		{"malformed progress above H is dropped", nil, entry(1, 5, 9, 9), *rec(5, 1, 0, 0), Created},
 	}
 	for _, tc := range cases {
@@ -56,6 +59,10 @@ func TestPlanAllocate(t *testing.T) {
 	out, o, err = PlanAllocate(rec(5, 1, 3, 1), c)
 	if err != nil || out.Generation != 51 || out.ProgressEpoch != 40 || out.ProgressSeq != 7 || o != Raised {
 		t.Fatalf("allocation above the host's record = %+v, %v, %v", out, o, err)
+	}
+	c.Local = &Entry{Incarnation: 2, Generation: 6}
+	if _, _, err := PlanAllocate(rec(5, 1, 3, 1), c); !errors.Is(err, ErrBehindHost) {
+		t.Fatalf("a host with a newer incarnation: %v, want ErrBehindHost", err)
 	}
 }
 
@@ -88,6 +95,15 @@ func TestPlanLower(t *testing.T) {
 	l.ExpectIncarnation = 2
 	if _, err := PlanLower(r, l); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale incarnation: %v, want ErrConflict", err)
+	}
+	l = lowering("a", "b")
+	l.TargetIncarnation = 1
+	if _, err := PlanLower(r, l); err == nil {
+		t.Fatal("a lowering to the current incarnation was accepted")
+	}
+	l.TargetIncarnation = 3 // re-applying a lowering a restored controller missed
+	if out, err := PlanLower(r, l); err != nil || out.Incarnation != 3 {
+		t.Fatalf("lowering to a target incarnation = %+v, %v", out, err)
 	}
 	l = lowering("a", "b")
 	l.Epoch = 21

@@ -392,6 +392,11 @@ func TestReplicaIDIsStableOnlyForSingleReplicaApps(t *testing.T) {
 	if got, err := replicaID(w, "one"); err != nil || got != "one" {
 		t.Fatalf("single-replica app: %q, %v", got, err)
 	}
+	// An installation placed before stable IDs keeps its own replica.
+	w.placements = []resource.Placement{{ResourceUID: "one", Replica: "rold"}}
+	if got, _ := replicaID(w, "one"); got != "rold" {
+		t.Fatalf("existing placement's replica not reused: %q", got)
+	}
 	a, _ := replicaID(w, "many")
 	b, _ := replicaID(w, "many")
 	if a == b || a == "many" || a[0] != 'r' {

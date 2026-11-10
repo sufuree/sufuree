@@ -164,7 +164,11 @@ A), so both survive the loss of any host. Production PHI workloads need this.
 - **Identity.** An app with `max_replicas` at most 1 is one installation, and
   its placements' replica is its resource UID on every host. The host config's
   workload `id` must be that UID. Apps that can run more replicas keep fresh
-  replica IDs and are not covered.
+  replica IDs and are not covered. A placement made before this change keeps
+  its random replica ID while it exists. Once released, the next placement
+  uses the UID, which is a different `inst/` prefix, so migrate the
+  installation's data and host records to the UID before enabling boot
+  floors.
 - **Boot.** Every boot asks the controller for a grant
   (`POST /v1/hosts/{id}/boot/{installation}`), which commits the next
   generation as its own Raft entry. The request carries the host's own record,
@@ -176,12 +180,15 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   only the installations that changed, plus a report at every guest exit and
   clean stop. After the loss of a host, the floor covers only up to its last
   report.
-- **Incarnations.** The floor only rises within an incarnation. Reports from an
-  older incarnation are dropped, so a host that missed a rollback can't raise
-  the floor back. A host record with a newer incarnation means the controller
-  is behind (for example, restored from a backup taken before a rollback). The
-  record is rebuilt from the host's without lowering the generation, and the
-  host logs an alert.
+- **Incarnations.** The generation only rises. The floor only rises within an
+  incarnation. Reports from an older incarnation contribute only their
+  generation, so a host that missed a rollback can't raise the floor back. A
+  host record with a newer incarnation means the controller is behind (for
+  example, restored from a backup taken before a rollback). The controller
+  never takes that host's floor, because doing so would lower the floor
+  without the audited action. Instead it refuses the boot (409), and the host
+  logs an alert. An operator then re-applies the lowering with
+  `target_incarnation` set to the host's incarnation.
 - **Intentional rollback.** `POST /v1/installations/{id}/floor/lower` with
   `expect_incarnation`, `epoch`, `seq`, `requested_by` (the installation
   owner), `approved_by` (a different Zati operator), `reason` and `reference`.
@@ -194,8 +201,9 @@ A), so both survive the loss of any host. Production PHI workloads need this.
 - **Raft.** Floor records live in their own bucket and are written by a
   `boot_floor` command, not by `restore_store`, so placement changes neither
   ship nor overwrite them. Raft snapshots carry both.
-- **Not yet safe for PHI.** The control API doesn't authenticate hosts: the
-  host ID in the path is taken on trust. Anyone who can reach the API could
+- **Not yet safe for PHI.** The control API doesn't authenticate hosts or
+  people: the host ID in the path is taken on trust, and `requested_by` and
+  `approved_by` are only checked to be different names. Anyone who can reach the API could
   raise a floor (stalling boots) or use up generations. Host authentication is
   the next change. Until it lands, both flags are off by default and the
   controller logs a warning.

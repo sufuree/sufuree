@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -118,7 +119,7 @@ func exercise(t *testing.T, st *store.Store, j bootfloor.Committer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.Generation != 51 || g.Incarnation != 1 || g.ProgressEpoch != 40 || g.ProgressSeq != 7 || g.Rebuilt {
+	if g.Generation != 51 || g.Incarnation != 1 || g.ProgressEpoch != 40 || g.ProgressSeq != 7 {
 		t.Fatalf("enrolment grant = %+v", g)
 	}
 	// Every boot is a fresh commit.
@@ -164,10 +165,28 @@ func exercise(t *testing.T, st *store.Store, j bootfloor.Committer) {
 		t.Fatalf("grant after lowering = %+v, %v", g, err)
 	}
 	// A host with a newer incarnation (the controller restored behind a
-	// rollback) rebuilds the record; H never goes down.
-	g, err = a.Boot(ctx, "inst-1", bootfloor.Entry{Incarnation: 3, IncarnationFrom: 60, Generation: 70, Epoch: 65, Seq: 2})
-	if err != nil || !g.Rebuilt || g.Incarnation != 3 || g.Generation != 71 || g.ProgressEpoch != 65 || g.IncarnationFrom != 60 {
-		t.Fatalf("rebuild grant = %+v, %v", g, err)
+	// rollback) is refused, and its claim never lowers the floor, by boot
+	// or by report.
+	ahead := bootfloor.Entry{Incarnation: 3, IncarnationFrom: 60, Generation: 70, Epoch: 0, Seq: 0}
+	if _, err := a.Boot(ctx, "inst-1", ahead); !errors.Is(err, bootfloor.ErrBehindHost) {
+		t.Fatalf("boot from a host ahead of the controller: %v, want ErrBehindHost", err)
+	}
+	ahead.Installation = "inst-1"
+	if res, err := a.Report(ctx, []bootfloor.Entry{ahead}); err != nil || len(res.Ahead) != 1 || res.Accepted != 0 {
+		t.Fatalf("report from a host ahead = %+v, %v", res, err)
+	}
+	if f := floorOf(t, st); f.Incarnation != 2 || f.ProgressEpoch != 51 || f.ProgressSeq != 1 || f.Generation != 70 {
+		t.Fatalf("a host claim moved the floor (only H may rise): %+v", f)
+	}
+	// An operator re-applies the missed lowering through the audited route.
+	relower := bootfloor.Lowering{ExpectIncarnation: 2, TargetIncarnation: 3, Epoch: 51, Seq: 1,
+		RequestedBy: "owner@clinic.example", ApprovedBy: "operator@zati.run", Reason: "re-apply after controller restore", Reference: "INC-8"}
+	if code, body := post(t, srv.URL+"/v1/installations/inst-1/floor/lower", relower); code != http.StatusOK {
+		t.Fatalf("re-lowering: %d %s", code, body)
+	}
+	g, err = a.Boot(ctx, "inst-1", ahead)
+	if err != nil || g.Incarnation != 3 || g.Generation != 71 || g.ProgressEpoch != 51 {
+		t.Fatalf("grant after re-lowering = %+v, %v", g, err)
 	}
 }
 
@@ -262,12 +281,16 @@ func TestRaftSnapshotCarriesFloors(t *testing.T) {
 	if f := floorOf(t, fresh); f.Generation != 10 || f.ProgressEpoch != 8 || f.ProgressSeq != 1 {
 		t.Fatalf("restored floor = %+v", f)
 	}
-	// A snapshot from before boot floors (a bare archive) still restores.
+	// A snapshot from before boot floors (a bare archive, say from an old
+	// leader mid-upgrade) still restores, and keeps the local floors.
 	var archive bytes.Buffer
 	if err := st.Export(&archive); err != nil {
 		t.Fatal(err)
 	}
 	if err := controlraft.StoreFSM(fresh).RestoreFn(archive.Bytes()); err != nil {
 		t.Fatalf("bare archive snapshot: %v", err)
+	}
+	if f := floorOf(t, fresh); f.Generation != 10 || f.ProgressEpoch != 8 {
+		t.Fatalf("a bare archive snapshot wiped the floors: %+v", f)
 	}
 }

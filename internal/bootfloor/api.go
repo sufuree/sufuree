@@ -22,8 +22,7 @@ type Committer interface {
 }
 
 // Grant is the controller's answer to a boot request: the H to boot with,
-// and the floor with its incarnation. Rebuilt reports that the host's
-// record was newer than the controller's (the controller was behind).
+// and the floor with its incarnation.
 type Grant struct {
 	Installation    string `json:"installation"`
 	Generation      uint64 `json:"generation"`
@@ -31,7 +30,6 @@ type Grant struct {
 	IncarnationFrom uint64 `json:"incarnation_from,omitempty"`
 	ProgressEpoch   uint64 `json:"progress_epoch"`
 	ProgressSeq     uint64 `json:"progress_seq"`
-	Rebuilt         bool   `json:"rebuilt,omitempty"`
 }
 
 // BootRequest is a host's boot request body.
@@ -44,11 +42,13 @@ type ReportRequest struct {
 	Entries []Entry `json:"entries"`
 }
 
-// ReportResult lists the entries the controller did not take because the
-// host does not hold those installations.
+// ReportResult lists the entries the controller did not take: NotHeld
+// because the host does not hold those installations, Ahead because the
+// host holds a newer floor incarnation (ErrBehindHost; only H was taken).
 type ReportResult struct {
 	Accepted int      `json:"accepted"`
 	NotHeld  []string `json:"not_held,omitempty"`
+	Ahead    []string `json:"ahead,omitempty"`
 }
 
 // LowerRequest is the audited rollback request body.
@@ -150,13 +150,13 @@ func postBoot(j Committer, w http.ResponseWriter, r *http.Request) {
 		if rec != nil {
 			c.Expect = rec.Generation
 		}
-		out, o, err := PlanAllocate(rec, c)
+		out, _, err := PlanAllocate(rec, c)
 		if err != nil {
 			return nil, err
 		}
 		grant = Grant{
 			Installation: inst, Generation: out.Generation, Incarnation: out.Incarnation,
-			IncarnationFrom: out.IncarnationFrom, ProgressEpoch: out.ProgressEpoch, ProgressSeq: out.ProgressSeq, Rebuilt: o == Rebuilt,
+			IncarnationFrom: out.IncarnationFrom, ProgressEpoch: out.ProgressEpoch, ProgressSeq: out.ProgressSeq,
 		}
 		return Encode(c)
 	})
@@ -200,9 +200,16 @@ func postReport(j Committer, w http.ResponseWriter, r *http.Request) {
 				res.NotHeld = append(res.NotHeld, e.Installation)
 				continue
 			}
+			rec, err := getFloor(tx, e.Installation)
+			if err != nil {
+				return nil, err
+			}
+			if _, o := Merge(rec, e); o == Ahead {
+				res.Ahead = append(res.Ahead, e.Installation)
+			}
 			c.Entries = append(c.Entries, e)
 		}
-		res.Accepted = len(c.Entries)
+		res.Accepted = len(c.Entries) - len(res.Ahead)
 		return Encode(c)
 	})
 	if err != nil {
@@ -263,7 +270,7 @@ func writeErr(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, ErrConflict), errors.Is(err, ErrStaleEpoch):
+	case errors.Is(err, ErrConflict), errors.Is(err, ErrStaleEpoch), errors.Is(err, ErrBehindHost):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, raftnode.ErrNotLeader):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
