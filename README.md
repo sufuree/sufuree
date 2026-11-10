@@ -185,6 +185,10 @@ Limits:
   days, and a compromised one is contained by rotating the CA.
 - **Raft peers.** The Raft transport between controller peers is not
   authenticated by this change.
+- **Product-client scope.** Any `product-client` may manage any resource and
+  request any lowering. Each product client must be scoped to its own
+  resources before a second product client exists.
+- **Encoded paths.** Percent-encoded request paths are refused.
 
 ### Boot generations and floors on the controller
 
@@ -243,7 +247,10 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   1. `POST /v1/installations/{id}/floor/lower-request` from a product client,
      naming the `owner` it authenticated.
   2. `POST /v1/installations/{id}/floor/lower-approve` from an operator,
-     repeating the request's incarnations, mark and reference.
+     naming the exact request by the `pending_digest` that
+     `GET /v1/installations/{id}/floor` returns. A request replaced
+     meanwhile, even with the same mark, isn't approved, and a request
+     expires after 24 hours.
 
   The audit records both principals.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
