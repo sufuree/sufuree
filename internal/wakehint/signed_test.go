@@ -189,3 +189,111 @@ func TestLoadOrCreateKey(t *testing.T) {
 		t.Fatalf("after an interrupted creation: %d bytes, %v", len(k), err)
 	}
 }
+
+// TestVerifyingRecordSurvivesRestart: with Record set, an agent restart
+// keeps the newest accepted hint, so an older signed hint replayed after
+// the restart is refused and a deleted hint falls back to the recorded one.
+func TestVerifyingRecordSurvivesRestart(t *testing.T) {
+	ctx, key, p := context.Background(), testKey(), "inst/abc"
+	at := func(gen, seq string) []byte {
+		return sign(key, p, `{"version":2,"generation":`+gen+`,"busy":false,"updated_at":"2026-11-09T00:00:00Z","seq":`+seq+`}`)
+	}
+	record := filepath.Join(t.TempDir(), "w1.last")
+	var recErrs []error
+	fresh := func(src *rawStore) *Verifying {
+		return &Verifying{Source: src, Key: key, Record: record, OnRecordError: func(err error) { recErrs = append(recErrs, err) }}
+	}
+	src := &rawStore{}
+	v := fresh(src)
+	for _, seq := range []string{"3", "4"} {
+		src.data = at("5", seq)
+		if _, _, err := v.Read(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st, err := os.Stat(record); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("record: %v %v, want a 0600 file", st, err)
+	}
+
+	// Restart: the store now serves the older hint (seq 3).
+	src.data = at("5", "3")
+	h, ok, err := fresh(src).Read(ctx, p)
+	if !ok || h.Seq != 4 || !errors.Is(err, ErrFallback) || !errors.Is(err, ErrStale) {
+		t.Fatalf("replay after restart: %+v ok=%v err=%v, want the recorded seq 4 and a stale refusal", h, ok, err)
+	}
+	// Without the record, that replay would have been accepted.
+	if h, _, err := (&Verifying{Source: src, Key: key}).Read(ctx, p); err != nil || h.Seq != 3 {
+		t.Fatalf("control without a record: %+v %v", h, err)
+	}
+	// Restart with the hint deleted: the recorded hint is used.
+	src.data = nil
+	if h, ok, err := fresh(src).Read(ctx, p); !ok || h.Seq != 4 || !errors.Is(err, ErrFallback) {
+		t.Fatalf("deleted hint after restart: %+v ok=%v err=%v", h, ok, err)
+	}
+	// A newer hint after restart is accepted and recorded.
+	src.data = at("6", "1")
+	if h, _, err := fresh(src).Read(ctx, p); err != nil || h.Generation != 6 {
+		t.Fatalf("newer hint after restart: %+v %v", h, err)
+	}
+	src.data = at("5", "4")
+	if h, _, err := fresh(src).Read(ctx, p); !errors.Is(err, ErrStale) || h.Generation != 6 {
+		t.Fatalf("the record did not advance: %+v %v", h, err)
+	}
+	if len(recErrs) != 0 {
+		t.Fatalf("record errors: %v", recErrs)
+	}
+}
+
+// TestVerifyingRecordRefusesBadRecords: a record that does not verify (a
+// different prefix, altered bytes), is not private or is not a regular file
+// is reported and ignored, never trusted.
+func TestVerifyingRecordRefusesBadRecords(t *testing.T) {
+	ctx, key, p := context.Background(), testKey(), "inst/abc"
+	hint := `{"version":2,"generation":5,"busy":false,"updated_at":"2026-11-09T00:00:00Z","seq":9}`
+	newer := sign(key, p, `{"version":2,"generation":5,"busy":false,"updated_at":"2026-11-09T00:00:00Z","seq":2}`)
+	cases := map[string]func(path string){
+		"another prefix": func(path string) { _ = os.WriteFile(path, sign(key, "inst/other", hint), 0o600) },
+		"altered": func(path string) {
+			_ = os.WriteFile(path, []byte(strings.Replace(string(sign(key, p, hint)), `"seq":9`, `"seq":99`, 1)), 0o600)
+		},
+		"not private": func(path string) { _ = os.WriteFile(path, sign(key, p, hint), 0o644); _ = os.Chmod(path, 0o644) },
+		"symlink": func(path string) {
+			target := path + ".target"
+			_ = os.WriteFile(target, sign(key, p, hint), 0o600)
+			_ = os.Symlink(target, path)
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			record := filepath.Join(t.TempDir(), "w1.last")
+			plant(record)
+			var recErrs []error
+			v := &Verifying{Source: &rawStore{data: newer}, Key: key, Record: record, OnRecordError: func(err error) { recErrs = append(recErrs, err) }}
+			h, _, err := v.Read(ctx, p)
+			if err != nil || h.Seq != 2 {
+				t.Fatalf("read with a bad record: %+v %v, want the stored seq 2 accepted", h, err)
+			}
+			if len(recErrs) == 0 {
+				t.Fatal("the bad record was not reported")
+			}
+		})
+	}
+}
+
+// TestVerifyingRecordWriteFailureKeepsHints: when the record cannot be
+// written, hints are still accepted and the failure is reported.
+func TestVerifyingRecordWriteFailureKeepsHints(t *testing.T) {
+	ctx, key, p := context.Background(), testKey(), "inst/abc"
+	var recErrs []error
+	v := &Verifying{
+		Source: &rawStore{data: sign(key, p, `{"version":2,"generation":5,"busy":true,"updated_at":"2026-11-09T00:00:00Z","seq":1}`)},
+		Key:    key, Record: filepath.Join(t.TempDir(), "missing-dir", "w1.last"),
+		OnRecordError: func(err error) { recErrs = append(recErrs, err) },
+	}
+	if h, ok, err := v.Read(ctx, p); err != nil || !ok || !h.Busy {
+		t.Fatalf("read: %+v %v %v", h, ok, err)
+	}
+	if len(recErrs) != 1 {
+		t.Fatalf("record errors = %d, want 1", len(recErrs))
+	}
+}

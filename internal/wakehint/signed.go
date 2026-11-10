@@ -36,9 +36,10 @@ import (
 // Verifying refuses unsigned or altered hints and replays: a hint older
 // than one it has accepted, ordered by (generation, seq). seq is the
 // guest's per-boot publish counter, so a guest clock that steps backward
-// does not make its later hints look stale. That record is in memory, so
-// the first hint read after an agent restart is accepted if its MAC
-// verifies.
+// does not make its later hints look stale. With Record set, the newest
+// accepted hint is also kept on the host's disk and reloaded (and verified
+// again) after an agent restart, so a restart does not reopen a replay of
+// an older signed hint. Without Record that state is in memory only.
 
 // MACLabel is the MAC domain separator, shared with workloads.
 const MACLabel = "sufuree wake hint v2"
@@ -134,12 +135,24 @@ type Verifying struct {
 	// been refused staleReportAfter times in a row (one alone can be a
 	// concurrent read's older bytes).
 	OnRefused func(error)
+	// Record, when set, is a host-local file that keeps the newest accepted
+	// hint's signed bytes across agent restarts. It belongs beside the key
+	// (a private directory), never in the hint store.
+	Record string
+	// OnRecordError, when set, is told when Record cannot be read or
+	// written. Neither is fatal: the hint is still used, and the cost is
+	// that the next restart starts without the record.
+	OnRecordError func(error)
 
-	mu    sync.Mutex
-	last  Hint
-	seen  bool
-	stale int // consecutive stale refusals
+	mu       sync.Mutex
+	last     Hint
+	seen     bool
+	stale    int  // consecutive stale refusals
+	recorded bool // Record has been loaded
 }
+
+// maxRecord bounds the record file read back at start.
+const maxRecord = 64 << 10
 
 // staleReportAfter is how many consecutive stale refusals are reported.
 const staleReportAfter = 3
@@ -168,10 +181,14 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.loadRecord(prefix)
 	if err == nil && v.seen && (h.Generation < v.last.Generation || (h.Generation == v.last.Generation && h.Seq < v.last.Seq)) {
 		err = fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
 	}
 	if err == nil {
+		if !v.seen || h.Generation != v.last.Generation || h.Seq != v.last.Seq {
+			v.saveRecord(data)
+		}
 		v.seen, v.last, v.stale = true, h, 0
 		return h, true, nil
 	}
@@ -192,6 +209,97 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 		v.OnRefused(err)
 	}
 	return v.last, true, fmt.Errorf("%w: %w", ErrFallback, err)
+}
+
+// loadRecord reloads the newest accepted hint once, verifying it again with
+// the key and prefix. v.mu must be held.
+func (v *Verifying) loadRecord(prefix string) {
+	if v.Record == "" || v.recorded {
+		return
+	}
+	v.recorded = true
+	data, err := readPrivate(v.Record, maxRecord)
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err == nil {
+		var h Hint
+		if h, err = Parse(data, prefix, v.Key); err == nil {
+			v.seen, v.last = true, h
+			return
+		}
+	}
+	v.recordError(fmt.Errorf("wake hint record %s: %w", v.Record, err))
+}
+
+// saveRecord replaces the record with data, the signed bytes of a newly
+// accepted hint. v.mu must be held.
+func (v *Verifying) saveRecord(data []byte) {
+	if v.Record == "" {
+		return
+	}
+	if err := writePrivate(v.Record, data); err != nil {
+		v.recordError(fmt.Errorf("wake hint record %s: %w", v.Record, err))
+	}
+}
+
+func (v *Verifying) recordError(err error) {
+	if v.OnRecordError != nil {
+		v.OnRecordError(err)
+	}
+}
+
+// writePrivate replaces path with data (mode 0600) by writing a synced
+// temporary file and renaming it into place, so a crash leaves the old
+// record or the new one, never a partial one.
+func writePrivate(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	cherr := f.Chmod(0o600)
+	_, werr := f.Write(data)
+	serr := f.Sync()
+	cerr := f.Close()
+	if err := errors.Join(cherr, werr, serr, cerr); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
+}
+
+// readPrivate reads a regular file readable only by its owner, refusing a
+// symlink and anything over limit bytes.
+func readPrivate(p string, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s must be a regular file readable only by its owner", p)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", p, limit)
+	}
+	return data, nil
 }
 
 // LoadOrCreateKey returns workload id's hint key from dir, creating it
