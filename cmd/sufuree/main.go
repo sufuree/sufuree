@@ -30,7 +30,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: sufuree <host|controller|app|version>")
+		return errors.New("usage: sufuree <host|controller|app|ca|version>")
 	}
 	switch args[0] {
 	case "host":
@@ -39,6 +39,8 @@ func run(args []string) error {
 		return runController(args[1:])
 	case "app":
 		return runApp(args[1:])
+	case "ca":
+		return runCA(args[1:])
 	case "version":
 		fmt.Fprintln(os.Stdout, version)
 		return nil

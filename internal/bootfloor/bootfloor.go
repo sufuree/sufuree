@@ -51,6 +51,10 @@ const (
 	KindAllocate = "allocate"
 	KindReport   = "report"
 	KindLower    = "lower"
+	// Two-person lowering on the authenticated API: one principal
+	// requests, a different one approves exactly that request.
+	KindRequestLower = "request_lower"
+	KindApproveLower = "approve_lower"
 )
 
 // MaxGeneration bounds any generation a host may claim, so a bad host
@@ -245,7 +249,52 @@ func PlanLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 	out.IncarnationFrom = rec.Generation + 1
 	out.ProgressEpoch, out.ProgressSeq = l.Epoch, l.Seq
 	out.Lowered = &audit
+	out.Pending = nil
 	return out, out.Validate()
+}
+
+// PlanRequestLower records a requested lowering on rec, replacing any
+// earlier request. It is checked as far as it can be before approval.
+func PlanRequestLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
+	if l.ExpectIncarnation != rec.Incarnation {
+		return resource.BootFloor{}, ErrConflict
+	}
+	target := l.TargetIncarnation
+	if target == 0 {
+		target = rec.Incarnation + 1
+	}
+	if l.Epoch > rec.Generation {
+		return resource.BootFloor{}, errors.New("bootfloor: the restored mark names a generation never issued")
+	}
+	out := rec
+	out.Pending = &resource.PendingLowering{
+		RequestedBy: l.RequestedBy, ExpectIncarnation: l.ExpectIncarnation, TargetIncarnation: target,
+		Epoch: l.Epoch, Seq: l.Seq, Reason: l.Reason, Reference: l.Reference, At: l.At,
+	}
+	return out, out.Validate()
+}
+
+// ErrNoMatchingRequest means an approval does not match the pending
+// request (or there is none).
+var ErrNoMatchingRequest = errors.New("bootfloor: no pending lowering matches this approval")
+
+// PlanApproveLower applies the pending lowering that l repeats, approved by
+// l.ApprovedBy, who must not be its requester.
+func PlanApproveLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
+	p := rec.Pending
+	target := l.TargetIncarnation
+	if target == 0 && p != nil {
+		target = p.TargetIncarnation
+	}
+	if p == nil || p.ExpectIncarnation != l.ExpectIncarnation || p.TargetIncarnation != target ||
+		p.Epoch != l.Epoch || p.Seq != l.Seq || p.Reference != l.Reference {
+		return resource.BootFloor{}, ErrNoMatchingRequest
+	}
+	return PlanLower(rec, Lowering{
+		ExpectIncarnation: p.ExpectIncarnation, TargetIncarnation: p.TargetIncarnation,
+		Epoch: p.Epoch, Seq: p.Seq, RequestedBy: p.RequestedBy, ApprovedBy: l.ApprovedBy,
+		Reason: p.Reason, Reference: p.Reference, At: l.At,
+	})
 }
 
 // Encode marshals a command for the FSM.
@@ -319,7 +368,7 @@ func Apply(tx *store.Tx, payload []byte) error {
 			}
 		}
 		return nil
-	case KindLower:
+	case KindLower, KindRequestLower, KindApproveLower:
 		if c.Lower == nil {
 			return errors.New("bootfloor: lower needs a lowering")
 		}
@@ -330,7 +379,10 @@ func Apply(tx *store.Tx, payload []byte) error {
 		if rec == nil {
 			return ErrNotFound
 		}
-		out, err := PlanLower(*rec, *c.Lower)
+		plan := map[string]func(resource.BootFloor, Lowering) (resource.BootFloor, error){
+			KindLower: PlanLower, KindRequestLower: PlanRequestLower, KindApproveLower: PlanApproveLower,
+		}[c.Kind]
+		out, err := plan(*rec, *c.Lower)
 		if err != nil {
 			return err
 		}

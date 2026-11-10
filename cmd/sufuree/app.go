@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sufuree/sufuree/internal/controlauth"
 	"github.com/sufuree/sufuree/internal/resource"
 )
 
@@ -32,11 +33,15 @@ func applyApp(args []string) error {
 	fs := flag.NewFlagSet("app apply", flag.ContinueOnError)
 	file := fs.String("file", "", "app resource JSON")
 	controller := fs.String("controller", "", "control API base URL")
+	tlsf := tlsFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" || *controller == "" {
 		return errors.New("--file and --controller are required")
+	}
+	if err := useControlClient(*tlsf, *controller); err != nil {
+		return err
 	}
 	body, err := os.ReadFile(*file)
 	if err != nil {
@@ -111,7 +116,11 @@ func getApp(args []string) error {
 	}
 	fs := flag.NewFlagSet("app get", flag.ContinueOnError)
 	controller := fs.String("controller", "", "control API base URL")
+	tlsf := tlsFlags(fs)
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := useControlClient(*tlsf, *controller); err != nil {
 		return err
 	}
 	if name == "" && fs.NArg() == 1 {
@@ -147,7 +156,7 @@ func putResource(url string, res resource.Resource) ([]byte, int, error) {
 	if res.ResourceVersion != 0 {
 		req.Header.Set("If-Match", fmt.Sprintf("%d", res.ResourceVersion))
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := controlClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -165,7 +174,7 @@ func httpJSON(method, url string, body []byte) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := controlClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -181,5 +190,25 @@ func printResource(body []byte) error {
 		return nil
 	}
 	fmt.Fprintln(os.Stdout, buf.String())
+	return nil
+}
+
+// controlClient is the HTTP client app commands use for the control API.
+var controlClient = http.DefaultClient
+
+func tlsFlags(fs *flag.FlagSet) *controlauth.TLSFlags {
+	var f controlauth.TLSFlags
+	fs.StringVar(&f.Cert, "tls-cert", "", "client certificate for an https controller (an operator or product-client principal)")
+	fs.StringVar(&f.Key, "tls-key", "", "client key")
+	fs.StringVar(&f.CA, "tls-ca", "", "controller CA certificate")
+	return &f
+}
+
+func useControlClient(f controlauth.TLSFlags, controller string) error {
+	c, err := f.Client(controller)
+	if err != nil {
+		return err
+	}
+	controlClient = c
 	return nil
 }

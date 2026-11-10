@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sufuree/sufuree/internal/bootfloor"
+	"github.com/sufuree/sufuree/internal/controlauth"
 	"github.com/sufuree/sufuree/internal/controlraft"
 	"github.com/sufuree/sufuree/internal/demand"
 	"github.com/sufuree/sufuree/internal/edge"
@@ -62,7 +63,10 @@ func runController(args []string) error {
 	raftBootstrap := fs.Bool("raft-bootstrap", false, "create the initial one-voter raft configuration; refuse if raft state already exists")
 	edgeListen := fs.String("edge-listen", "", "optional public HTTP edge listen address")
 	edgeMax := fs.Int("edge-max-concurrent", 256, "edge concurrent request cap; 0 disables the cap")
-	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts (host identity is not authenticated yet: not for PHI)")
+	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts")
+	tlsCert := fs.String("tls-cert", "", "control API server certificate (from `sufuree ca issue --role controller`)")
+	tlsKey := fs.String("tls-key", "", "control API server key")
+	tlsClientCA := fs.String("tls-client-ca", "", "controller CA certificate; every caller must present a certificate it issued")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -150,9 +154,17 @@ func runController(args []string) error {
 	if node != nil {
 		leader = node
 	}
-	srv := &http.Server{Handler: controlHandlerWith(leader, c, floorJournal(*bootFloor, journal))}
-	if *bootFloor {
-		log.Warn("boot floors enabled; host identity on the control API is not authenticated yet, so this is not for PHI")
+	authOn := *tlsCert != "" || *tlsKey != "" || *tlsClientCA != ""
+	srv := &http.Server{Handler: controlHandlerAuth(leader, c, floorJournal(*bootFloor, journal), authOn)}
+	if authOn {
+		if *tlsCert == "" || *tlsKey == "" || *tlsClientCA == "" {
+			return errors.New("--tls-cert, --tls-key and --tls-client-ca must be set together")
+		}
+		if srv.TLSConfig, err = controlauth.ServerTLS(*tlsCert, *tlsKey, *tlsClientCA); err != nil {
+			return err
+		}
+	} else {
+		log.Warn("control API without TLS or caller authentication: development only, not for PHI")
 	}
 	var edgeSrv *http.Server
 	var edgeLn net.Listener
@@ -176,7 +188,12 @@ func runController(args []string) error {
 	}
 	go func() {
 		log.Info("control API", "addr", ln.Addr().String(), "executor", *execName)
-		err := srv.Serve(ln)
+		var err error
+		if authOn {
+			err = srv.ServeTLS(ln, "", "")
+		} else {
+			err = srv.Serve(ln)
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
@@ -243,16 +260,37 @@ func floorJournal(on bool, j *controlraft.Journal) bootfloor.Committer {
 // controlHandlerWith is the control API, plus the boot-floor routes when
 // floors is set.
 func controlHandlerWith(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer) http.Handler {
+	return controlHandlerAuth(leader, c, floors, false)
+}
+
+// controlHandlerAuth is the control API. With auth, every request needs a
+// verified client certificate whose principal the route policy admits
+// (controlauth), and floor lowering takes two authenticated principals.
+func controlHandlerAuth(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer, auth bool) http.Handler {
 	next := reconcile.Handler(c)
 	if floors != nil {
 		mux := http.NewServeMux()
-		bootfloor.Register(mux, floors, nil)
+		var identify bootfloor.Identify
+		if auth {
+			identify = func(r *http.Request) (string, bool) {
+				p, ok := controlauth.FromContext(r.Context())
+				return p.String(), ok
+			}
+		}
+		bootfloor.RegisterWithIdentity(mux, floors, nil, identify)
 		mux.Handle("/", next)
 		next = mux
 	}
-	if leader == nil {
-		return next
+	if leader != nil {
+		next = leaderOnly(leader, next)
 	}
+	if auth {
+		next = controlauth.Middleware(next)
+	}
+	return next
+}
+
+func leaderOnly(leader leaderView, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mutates(r.Method) && !leader.IsLeader() {
 			http.Error(w, raftnode.ErrNotLeader.Error(), http.StatusServiceUnavailable)

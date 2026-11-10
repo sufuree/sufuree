@@ -28,6 +28,49 @@ type BootFloor struct {
 	ProgressEpoch   uint64         `json:"progress_epoch,omitempty"`
 	ProgressSeq     uint64         `json:"progress_seq,omitempty"`
 	Lowered         *FloorLowering `json:"lowered,omitempty"`
+	// Pending is a requested lowering waiting for a second principal's
+	// approval (authenticated control API only).
+	Pending *PendingLowering `json:"pending,omitempty"`
+}
+
+// PendingLowering is a floor lowering one principal requested and another
+// must approve. The approval must repeat the mark, the incarnations and
+// the reference, so it approves exactly this request.
+type PendingLowering struct {
+	RequestedBy       string    `json:"requested_by"`
+	ExpectIncarnation uint64    `json:"expect_incarnation"`
+	TargetIncarnation uint64    `json:"target_incarnation"`
+	Epoch             uint64    `json:"epoch"`
+	Seq               uint64    `json:"seq"`
+	Reason            string    `json:"reason"`
+	Reference         string    `json:"reference"`
+	At                time.Time `json:"at"`
+}
+
+func (l *PendingLowering) UnmarshalJSON(b []byte) error {
+	type alias PendingLowering
+	var raw alias
+	if err := decodeStrict(b, &raw); err != nil {
+		return err
+	}
+	*l = PendingLowering(raw)
+	return nil
+}
+
+// Validate checks the request's shape.
+func (l PendingLowering) Validate() error {
+	for name, v := range map[string]string{"requested_by": l.RequestedBy, "reason": l.Reason, "reference": l.Reference} {
+		if strings.TrimSpace(v) == "" || len(v) > 512 {
+			return fmt.Errorf("pending lowering: %s is required (at most 512 bytes)", name)
+		}
+	}
+	if l.TargetIncarnation <= l.ExpectIncarnation {
+		return errors.New("pending lowering: the target incarnation must be above the expected one")
+	}
+	if l.At.IsZero() {
+		return errors.New("pending lowering: at is required")
+	}
+	return nil
 }
 
 // FloorLowering is the audit record of an intentional rollback: the
@@ -78,6 +121,11 @@ func (f BootFloor) Validate() error {
 	}
 	if f.Lowered != nil {
 		if err := f.Lowered.Validate(); err != nil {
+			return err
+		}
+	}
+	if f.Pending != nil {
+		if err := f.Pending.Validate(); err != nil {
 			return err
 		}
 	}

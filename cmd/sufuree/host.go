@@ -19,6 +19,7 @@ import (
 	"github.com/sufuree/sufuree/internal/activator"
 	"github.com/sufuree/sufuree/internal/bootcred"
 	"github.com/sufuree/sufuree/internal/bootfloor"
+	"github.com/sufuree/sufuree/internal/controlauth"
 	"github.com/sufuree/sufuree/internal/gateway"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
@@ -34,6 +35,10 @@ func runHost(args []string) error {
 	controllerURL := fs.String("controller", "", "optional control API base URL for assignment pull and credential authorize")
 	hostUID := fs.String("host-id", "", "this host's control-plane UID; required with --controller")
 	bootFloor := fs.Bool("boot-floor", false, "take every boot generation and rollback floor from the controller and report progress to it; needs --controller")
+	var tlsf controlauth.TLSFlags
+	fs.StringVar(&tlsf.Cert, "tls-cert", "", "this host's client certificate for an https controller")
+	fs.StringVar(&tlsf.Key, "tls-key", "", "this host's client key")
+	fs.StringVar(&tlsf.CA, "tls-ca", "", "controller CA certificate")
 	floorEvery := fs.Duration("floor-report", bootfloor.DefaultInterval, "how often progress is reported to the controller with --boot-floor")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -46,6 +51,13 @@ func runHost(args []string) error {
 	}
 	if *bootFloor && *controllerURL == "" {
 		return errors.New("--boot-floor needs --controller and --host-id")
+	}
+	if tlsf.Set() && *controllerURL == "" {
+		return errors.New("--tls-* flags need --controller")
+	}
+	controlClient, err := tlsf.Client(*controllerURL)
+	if err != nil {
+		return err
 	}
 	cfg, err := workload.Load(*cfgPath)
 	if err != nil {
@@ -99,6 +111,7 @@ func runHost(args []string) error {
 			Client: &bootcred.AssignmentClient{
 				BaseURL: *controllerURL,
 				HostUID: *hostUID,
+				HTTP:    controlClient,
 			},
 		}
 		log.Info("boot credentials guarded by controller assignments", "controller", *controllerURL, "host", *hostUID)
@@ -113,7 +126,7 @@ func runHost(args []string) error {
 	// reporter outlives the activators so their exit reports are sent.
 	var floor *bootfloor.Host
 	if *bootFloor {
-		client := &bootfloor.Client{BaseURL: *controllerURL, HostUID: *hostUID}
+		client := &bootfloor.Client{BaseURL: *controllerURL, HostUID: *hostUID, HTTP: controlClient}
 		floor = &bootfloor.Host{Client: client, Reporter: &bootfloor.Reporter{Client: client, Interval: *floorEvery, Logger: log}}
 		// Enrolment: report every workload's local record once, so the
 		// controller's records start at or above this host's.
