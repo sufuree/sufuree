@@ -69,6 +69,19 @@ func (e AWSRoleEnv) Keys() []string {
 	return []string{e.AccessKeyID, e.SecretAccessKey, e.SessionToken}
 }
 
+// ReplicaCredentials gives each boot the installation's own object-store
+// credentials, issued by the controller and limited to the installation's
+// replica prefix (package replicacred). The agent needs --controller.
+type ReplicaCredentials struct {
+	Env ReplicaCredentialsEnv `json:"env"`
+}
+
+// ReplicaCredentialsEnv names the boot env keys that receive them.
+type ReplicaCredentialsEnv struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+}
+
 // Spec is one stateful unikernel workload.
 type Spec struct {
 	ID string `json:"id"`
@@ -93,6 +106,10 @@ type Spec struct {
 	BootFiles map[string]string `json:"boot_files,omitempty"`
 	// BootCredentials, when set, issues per-boot credentials (see AWSRole).
 	BootCredentials *AWSRole `json:"boot_credentials,omitempty"`
+	// ReplicaCredentials, when set, gives each boot the installation's own
+	// replica credentials (see ReplicaCredentials). The workload ID is the
+	// installation.
+	ReplicaCredentials *ReplicaCredentials `json:"replica_credentials,omitempty"`
 	// HintPrefix is the object-store prefix the guest publishes
 	// <prefix>/wake.json under.
 	HintPrefix string `json:"hint_prefix,omitempty"`
@@ -245,6 +262,21 @@ func (w Spec) validate() error {
 		}
 		if err := c.validate(w); err != nil {
 			return bad(err.Error())
+		}
+	}
+	if r := w.ReplicaCredentials; r != nil {
+		used := map[string]bool{w.GenerationEnvKey: true, w.ProgressEnvKey: true, w.HintKeyEnvKey: true}
+		for k := range w.BootEnv {
+			used[k] = true
+		}
+		if c := w.BootCredentials; c != nil {
+			for _, k := range c.Env.Keys() {
+				used[k] = true
+			}
+		}
+		a, s := r.Env.AccessKeyID, r.Env.SecretAccessKey
+		if a == "" || s == "" || a == s || strings.ContainsAny(a+s, "=\n\r") || used[a] || used[s] {
+			return bad("replica_credentials.env needs two distinct plain keys not used by boot_env, boot_credentials, generation_env_key, progress_env_key or hint_key_env_key")
 		}
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sufuree/sufuree/internal/bootscope"
+	"github.com/sufuree/sufuree/internal/replicacred"
 	"github.com/sufuree/sufuree/internal/workload"
 )
 
@@ -67,44 +68,67 @@ func (c *AssignmentClient) FetchAssignments(ctx context.Context) ([]bootscope.As
 // AuthorizeTags POSTs /v1/hosts/{id}/credentials/{installation} and returns
 // controller-pinned session tags. Does not call STS.
 func (c *AssignmentClient) AuthorizeTags(ctx context.Context, installation string, requested map[string]string) (map[string]string, error) {
-	if c == nil || c.BaseURL == "" || c.HostUID == "" {
-		return nil, errors.New("bootcred: assignment client needs base URL and host id")
-	}
-	payload, err := json.Marshal(map[string]any{"requested_tags": requested})
-	if err != nil {
-		return nil, err
-	}
-	url := strings.TrimRight(c.BaseURL, "/") + "/v1/hosts/" + c.HostUID + "/credentials/" + installation
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<16))
-	if err != nil {
-		return nil, err
-	}
-	if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusBadRequest {
-		return nil, fmt.Errorf("%w: %s: %s", ErrAuthorizeDenied, res.Status, strings.TrimSpace(string(body)))
-	}
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bootcred: authorize %s: %s", res.Status, strings.TrimSpace(string(body)))
-	}
 	var out struct {
 		SessionTags map[string]string `json:"session_tags"`
 	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("bootcred: authorize JSON: %w", err)
+	if err := c.postCredentials(ctx, installation, map[string]any{"requested_tags": requested}, &out); err != nil {
+		return nil, err
 	}
 	if len(out.SessionTags) == 0 {
 		return nil, errors.New("bootcred: authorize returned no session tags")
 	}
 	return out.SessionTags, nil
+}
+
+// ReplicaCredentials POSTs /v1/hosts/{id}/credentials/{installation} and
+// returns the installation's own replica credentials, which the controller
+// issues only to a host holding the installation.
+func (c *AssignmentClient) ReplicaCredentials(ctx context.Context, installation string) (replicacred.Credentials, error) {
+	var out struct {
+		Replica *replicacred.Credentials `json:"replica"`
+	}
+	if err := c.postCredentials(ctx, installation, map[string]any{}, &out); err != nil {
+		return replicacred.Credentials{}, err
+	}
+	if out.Replica == nil || out.Replica.AccessKeyID == "" || out.Replica.SecretAccessKey == "" {
+		return replicacred.Credentials{}, errors.New("bootcred: the controller issues no replica credentials (start it with --replica-credentials)")
+	}
+	return *out.Replica, nil
+}
+
+func (c *AssignmentClient) postCredentials(ctx context.Context, installation string, in any, out any) error {
+	if c == nil || c.BaseURL == "" || c.HostUID == "" {
+		return errors.New("bootcred: assignment client needs base URL and host id")
+	}
+	payload, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(c.BaseURL, "/") + "/v1/hosts/" + c.HostUID + "/credentials/" + installation
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<16))
+	if err != nil {
+		return err
+	}
+	if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusBadRequest {
+		return fmt.Errorf("%w: %s: %s", ErrAuthorizeDenied, res.Status, strings.TrimSpace(string(body)))
+	}
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("bootcred: credentials %s: %s", res.Status, strings.TrimSpace(string(body)))
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("bootcred: credentials JSON: %w", err)
+	}
+	return nil
 }
 
 // Guarded wraps an Issuer so boot credentials only use tags the controller

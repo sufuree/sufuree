@@ -133,3 +133,34 @@ func TestRefusesInjection(t *testing.T) {
 		}
 	}
 }
+
+const replicaCreds = `"replica_credentials":{"env":{"access_key_id":"RAK","secret_access_key":"RSK"}},`
+
+func TestReplicaCredentials(t *testing.T) {
+	with := strings.Replace(good, `"boot_env":{`, replicaCreds+`"boot_env":{`, 1)
+	c, err := Load(write(t, with))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Workloads[0].ReplicaCredentials; r == nil || r.Env.AccessKeyID != "RAK" || r.Env.SecretAccessKey != "RSK" {
+		t.Fatalf("replica_credentials = %+v", r)
+	}
+	both := strings.Replace(with, `"boot_env":{`, creds+`"boot_env":{`, 1)
+	if _, err := Load(write(t, both)); err != nil {
+		t.Fatalf("with boot_credentials too: %v", err)
+	}
+	for name, s := range map[string]string{
+		"missing key":         strings.Replace(with, `"secret_access_key":"RSK"`, `"secret_access_key":""`, 1),
+		"same key":            strings.Replace(with, `"secret_access_key":"RSK"`, `"secret_access_key":"RAK"`, 1),
+		"in boot_env":         strings.Replace(with, `"secret_access_key":"RSK"`, `"secret_access_key":"K"`, 1),
+		"generation key":      strings.Replace(with, `"access_key_id":"RAK"`, `"access_key_id":"ZATI_REPLICA_GENERATION"`, 1),
+		"boot credential key": strings.Replace(both, `"access_key_id":"RAK"`, `"access_key_id":"ST"`, 1),
+		"hint key":            strings.Replace(strings.Replace(with, `"hint_prefix":"inst/inst-1",`, `"hint_prefix":"inst/inst-1","hint_key_env_key":"HK",`, 1), `"access_key_id":"RAK"`, `"access_key_id":"HK"`, 1),
+		"newline":             strings.Replace(with, `"access_key_id":"RAK"`, `"access_key_id":"R\nAK"`, 1),
+		"unknown field":       strings.Replace(with, `"env":{"access_key_id"`, `"bucket":"x","env":{"access_key_id"`, 1),
+	} {
+		if _, err := Load(write(t, s)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

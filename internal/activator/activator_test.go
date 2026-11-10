@@ -13,6 +13,7 @@ import (
 	"github.com/sufuree/sufuree/internal/bootcred"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
+	"github.com/sufuree/sufuree/internal/replicacred"
 	"github.com/sufuree/sufuree/internal/wakehint"
 	"github.com/sufuree/sufuree/internal/workload"
 )
@@ -682,5 +683,75 @@ func TestRefusedHintsCannotHoldAnOldBusyForever(t *testing.T) {
 	waitFor(t, "stop despite a held busy fallback", func() bool { st, _, _, _ := a.Snapshot(); return st == Asleep })
 	if _, _, _, s := a.Snapshot(); s.BusyVetoes != maxHintErrors+1 {
 		t.Fatalf("vetoes = %d, want %d (one genuine busy, then the unreadable bound)", s.BusyVetoes, maxHintErrors+1)
+	}
+}
+
+type fakeReplica struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (f *fakeReplica) ReplicaCredentials(_ context.Context, installation string) (replicacred.Credentials, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, installation)
+	if f.err != nil {
+		return replicacred.Credentials{}, f.err
+	}
+	return replicacred.Credentials{AccessKeyID: "SFR-" + installation, SecretAccessKey: "secret-" + installation}, nil
+}
+
+func newReplicaAct(t *testing.T, l guest.Launcher, rep ReplicaIssuer) *Activator {
+	t.Helper()
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := spec()
+	s.ReplicaCredentials = &workload.ReplicaCredentials{Env: workload.ReplicaCredentialsEnv{AccessKeyID: "RAK", SecretAccessKey: "RSK"}}
+	opt := Options{
+		Tick: 10 * time.Millisecond, StopGrace: 10 * time.Millisecond, Attempts: 1,
+		Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+		Ready:  func(context.Context, string) error { return nil },
+	}
+	if rep != nil {
+		opt.Replica = rep
+	}
+	return New(s, j, l, nil, opt)
+}
+
+func TestBootGetsTheInstallationsReplicaCredentials(t *testing.T) {
+	l := &fakeLauncher{}
+	rep := &fakeReplica{}
+	a := newReplicaAct(t, l, rep)
+	run(t, a)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id := spec().ID
+	if len(l.envs) != 1 || l.envs[0]["RAK"] != "SFR-"+id || l.envs[0]["RSK"] != "secret-"+id {
+		t.Fatalf("env %v", l.envs)
+	}
+	if len(rep.calls) != 1 || rep.calls[0] != id {
+		t.Fatalf("asked for %v", rep.calls)
+	}
+}
+
+func TestBootFailsClosedWithoutReplicaCredentials(t *testing.T) {
+	for name, rep := range map[string]ReplicaIssuer{"no controller": nil, "refused": &fakeReplica{err: errors.New("403")}} {
+		l := &fakeLauncher{}
+		a := newReplicaAct(t, l, rep)
+		run(t, a)
+		if _, _, err := a.Acquire(context.Background()); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if l.count() != 0 {
+			t.Fatalf("%s: guest booted without replica credentials", name)
+		}
 	}
 }

@@ -20,6 +20,7 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 | Edge | Mounted via `--edge-listen`; `/svc/<name>/`, Host routing, 503/429, `/healthz` no wake | TLS, real host-gateway upstream publication, admission under load |
 | Host assignments | `GET /v1/hosts/{id}/assignments`; host `--controller` + `--host-id` pulls via `bootcred.AssignmentClient` | Watch/push transport; multi-host enrollment |
 | Boot credential scope | `POST /v1/hosts/{id}/credentials/{installation}` authorizes pinned tags (no STS on controller); `bootcred.Guarded` forces those tags before host AssumeRole | Controller-issued STS; AWS executor fences |
+| Replica credentials | `--replica-credentials`: per-installation SeaweedFS identities limited to `inst/<id>/*`, derived from a KMS-wrapped provisioning key, registered through the signed filer API and probed before use, delivered on the credentials route | Identity removal on delete; per-installation hint reader credentials |
 | Warm | `GET /v1/warm`; observe reports shortfall without buying; active may request buffer after demand is met | Measured adaptive sizing |
 | CLI | `host`, `controller` (raft + edge flags), `app apply/get`, `version` | `sufuree db` (RFC-0002) |
 
