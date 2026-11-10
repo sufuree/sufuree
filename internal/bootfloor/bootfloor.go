@@ -11,14 +11,19 @@
 // Zati operator approves) starts a new incarnation with a lower floor.
 //
 // Merging a host record follows one rule everywhere:
-//   - an older incarnation is dropped, so a host that missed a rollback
-//     cannot raise the floor above its target;
-//   - the same incarnation keeps the maximum H and the maximum floor;
-//   - a newer incarnation means the controller is behind (its own journal
-//     was restored from a backup taken before a lowering): the record is
-//     rebuilt from the host's, keeping the higher H. This is how H and the
-//     floor are rebuilt after a controller restore and seeded when a
-//     standalone host enrols, without lowering either.
+//   - H always takes the maximum: raising it is always safe;
+//   - an older incarnation's floor is dropped, so a host that missed a
+//     rollback cannot raise the floor above its target;
+//   - the same incarnation keeps the maximum floor;
+//   - a newer incarnation's floor is never taken: the host's record is
+//     only a claim, and adopting it would lower the floor without the
+//     audited two-person action. The controller is behind (its journal was
+//     restored from a backup taken before a lowering), so the boot is
+//     refused (ErrBehindHost) until an operator re-applies the lowering
+//     through Lower, which records the audit again.
+//
+// A controller with no record seeds it from the first host entry, so a
+// standalone host enrols without losing its H or floor.
 //
 // Commands are applied deterministically by the controller FSM (Apply).
 // Whether the host holds the installation is checked by the leader under
@@ -47,6 +52,10 @@ const (
 	KindLower    = "lower"
 )
 
+// MaxGeneration bounds any generation a host may claim, so a bad host
+// record cannot exhaust an installation's generations.
+const MaxGeneration = 1 << 48
+
 // MaxReportEntries bounds one report command.
 const MaxReportEntries = 5000
 
@@ -57,6 +66,10 @@ var (
 	// ErrStaleEpoch means the command was planned under an older owner
 	// epoch than the store now holds.
 	ErrStaleEpoch = errors.New("bootfloor: owner epoch changed")
+	// ErrBehindHost means a host holds a newer floor incarnation than the
+	// controller: the controller missed a lowering (it was restored from an
+	// older backup). Boots are refused until the lowering is re-applied.
+	ErrBehindHost = errors.New("bootfloor: the controller is behind this host's floor incarnation; re-apply the lowering")
 	// ErrNotFound means there is no floor record for the installation.
 	ErrNotFound = errors.New("bootfloor: no record for this installation")
 )
@@ -77,6 +90,10 @@ type Entry struct {
 // lease's exact (data generation, TXID).
 type Lowering struct {
 	ExpectIncarnation uint64 `json:"expect_incarnation"`
+	// TargetIncarnation is the new incarnation; zero means the next one.
+	// Re-applying a lowering a restored controller missed sets it to the
+	// incarnation the hosts hold.
+	TargetIncarnation uint64 `json:"target_incarnation,omitempty"`
 	Epoch             uint64 `json:"epoch"`
 	Seq               uint64 `json:"seq"`
 	RequestedBy       string `json:"requested_by"`
@@ -106,14 +123,14 @@ type Command struct {
 type Outcome int
 
 const (
-	Unchanged Outcome = iota // nothing new, or an older incarnation dropped
-	Raised                   // same incarnation; H or the floor rose
-	Rebuilt                  // the host's newer incarnation replaced the record
+	Unchanged Outcome = iota // nothing new
+	Raised                   // H or the floor rose
+	Ahead                    // the host holds a newer incarnation; only H was taken
 	Created                  // no record existed
 )
 
 func (o Outcome) String() string {
-	return [...]string{"unchanged", "raised", "rebuilt", "created"}[o]
+	return [...]string{"unchanged", "raised", "ahead", "created"}[o]
 }
 
 func progressBelow(e1, s1, e2, s2 uint64) bool {
@@ -126,6 +143,9 @@ func Merge(rec *resource.BootFloor, e Entry) (resource.BootFloor, Outcome) {
 	inc := max(e.Incarnation, 1)
 	// A host record never holds progress above an H it issued; clamp a
 	// malformed one instead of letting it break the record's invariant.
+	if e.Generation > MaxGeneration {
+		e.Generation, e.Epoch, e.Seq = 0, 0, 0
+	}
 	epoch, seq := e.Epoch, e.Seq
 	if epoch > e.Generation {
 		epoch, seq = 0, 0
@@ -137,18 +157,15 @@ func Merge(rec *resource.BootFloor, e Entry) (resource.BootFloor, Outcome) {
 		}, Created
 	}
 	out := *rec
-	switch {
-	case inc < rec.Incarnation:
-		return out, Unchanged
-	case inc > rec.Incarnation:
-		out.Incarnation, out.IncarnationFrom = inc, e.IncarnationFrom
-		out.Generation = max(rec.Generation, e.Generation)
-		out.ProgressEpoch, out.ProgressSeq = epoch, seq
-		return out, Rebuilt
-	}
 	o := Unchanged
 	if e.Generation > out.Generation {
 		out.Generation, o = e.Generation, Raised
+	}
+	switch {
+	case inc < rec.Incarnation:
+		return out, o
+	case inc > rec.Incarnation:
+		return out, Ahead
 	}
 	if progressBelow(out.ProgressEpoch, out.ProgressSeq, epoch, seq) {
 		out.ProgressEpoch, out.ProgressSeq, o = epoch, seq, Raised
@@ -177,6 +194,9 @@ func PlanAllocate(rec *resource.BootFloor, c Command) (resource.BootFloor, Outco
 		local := *c.Local
 		local.Installation = c.Installation
 		out, o = Merge(rec, local)
+		if o == Ahead {
+			return resource.BootFloor{}, o, ErrBehindHost
+		}
 	case rec != nil:
 		out = *rec
 	default:
@@ -194,6 +214,13 @@ func PlanLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 	if l.ExpectIncarnation != rec.Incarnation {
 		return resource.BootFloor{}, ErrConflict
 	}
+	target := l.TargetIncarnation
+	if target == 0 {
+		target = rec.Incarnation + 1
+	}
+	if target <= rec.Incarnation {
+		return resource.BootFloor{}, errors.New("bootfloor: the target incarnation must be above the current one")
+	}
 	if l.Epoch > rec.Generation {
 		return resource.BootFloor{}, errors.New("bootfloor: the restored mark names a generation never issued")
 	}
@@ -205,7 +232,7 @@ func PlanLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 		return resource.BootFloor{}, err
 	}
 	out := rec
-	out.Incarnation++
+	out.Incarnation = target
 	out.IncarnationFrom = rec.Generation + 1
 	out.ProgressEpoch, out.ProgressSeq = l.Epoch, l.Seq
 	out.Lowered = &audit
@@ -275,7 +302,7 @@ func Apply(tx *store.Tx, payload []byte) error {
 				return err
 			}
 			out, o := Merge(rec, e)
-			if o == Unchanged {
+			if o == Unchanged || (o == Ahead && rec != nil && out.Generation == rec.Generation) {
 				continue
 			}
 			if err := tx.PutBootFloor(out); err != nil {

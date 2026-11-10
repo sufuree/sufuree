@@ -116,7 +116,8 @@ type Activator struct {
 	// lastFloorRead is when an awake workload's progress was last read
 	// for the controller.
 	lastFloorRead time.Time
-	closed        bool // shutting down: no new leases or wakes
+	exits         sync.WaitGroup // running watchExit goroutines
+	closed        bool           // shutting down: no new leases or wakes
 	// A hint wakes a sleeping workload once per trigger (a busy hint's
 	// generation, or a next_due instant), so a guest that never updates
 	// its hint is not woken, idle-stopped and woken again forever. A
@@ -254,6 +255,9 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 			a.failedHintWakes, a.hintWakeAfter = 0, time.Time{}
 			a.state, a.guest, a.generation = Awake, g, gen
 			a.awakeSince, a.lastActive = time.Now(), time.Now()
+			// Counted before anyone can see Awake, so shutdown's Wait
+			// always covers this guest's exit watcher.
+			a.exits.Add(1)
 			close(done)
 			a.mu.Unlock()
 			a.log.Info("awake", "generation", gen, "scheduled", scheduled, "attempt", attempt)
@@ -373,15 +377,22 @@ func (a *Activator) issueGeneration() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	local := entryOf(a.spec.ID, r)
+	// A verified hint's generation is an authenticated lower bound on H:
+	// sending it keeps a controller restored behind the store from granting
+	// an H the guest's fence refuses, one boot attempt at a time.
+	if hg := a.verifiedHintGeneration(); hg > local.Generation && hg <= bootfloor.MaxGeneration {
+		local.Generation = hg
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), FloorGrantTimeout)
 	defer cancel()
-	g, err := a.opt.Floor.Boot(ctx, a.spec.ID, entryOf(a.spec.ID, r))
+	g, err := a.opt.Floor.Boot(ctx, a.spec.ID, local)
 	if err != nil {
+		if errors.Is(err, bootfloor.ErrBehindHost) {
+			a.log.Error("ALERT: refusing a boot: the controller is behind this host's floor incarnation (restored from an older backup?); an operator must re-apply the lowering",
+				"incarnation", r.Incarnation)
+		}
 		return 0, fmt.Errorf("controller boot grant: %w", err)
-	}
-	if g.Rebuilt {
-		a.log.Error("ALERT: the controller's boot floor was behind this host's newer incarnation and was rebuilt from it; check for a controller restore",
-			"incarnation", g.Incarnation, "generation", g.Generation)
 	}
 	nr, err := a.journal.Adopt(a.spec.ID, journal.Grant{
 		Generation: g.Generation, Incarnation: g.Incarnation, IncarnationFrom: g.IncarnationFrom,
@@ -398,6 +409,21 @@ func (a *Activator) issueGeneration() (uint64, error) {
 			"incarnation", nr.Incarnation, "from_generation", nr.IncarnationFrom)
 	}
 	return g.Generation, nil
+}
+
+// verifiedHintGeneration returns the generation of the current signed
+// hint, or 0 when hints are unsigned or unreadable.
+func (a *Activator) verifiedHintGeneration() uint64 {
+	if a.hints == nil || a.spec.HintPrefix == "" || len(a.opt.HintKey) == 0 {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ProgressReadTimeout)
+	defer cancel()
+	h, ok, err := a.hints.Read(ctx, a.spec.HintPrefix)
+	if (err != nil && !errors.Is(err, wakehint.ErrFallback)) || !ok {
+		return 0
+	}
+	return h.Generation
 }
 
 func entryOf(id string, r journal.Record) bootfloor.Entry {
@@ -501,6 +527,7 @@ func (a *Activator) progressEnv(env map[string]string) error {
 // (crash, OOM, guest-initiated exit). After any exit it records the final
 // hint's progress, while the store is least likely to have been altered.
 func (a *Activator) watchExit(g guest.Guest, gen uint64) {
+	defer a.exits.Done()
 	<-g.Exited()
 	a.mu.Lock()
 	if a.guest == g && a.state == Awake {
@@ -707,6 +734,10 @@ func (a *Activator) shutdown() {
 	if g != nil {
 		_ = g.Stop(a.opt.StopGrace)
 	}
+	// Wait for the exit watchers to record the final progress (and note it
+	// for the controller), so Run returns only after that and the host's
+	// last report carries it. Each is bounded by its hint read timeout.
+	a.exits.Wait()
 }
 
 // httpReady succeeds when the guest answers HTTP at all. A TCP connect is

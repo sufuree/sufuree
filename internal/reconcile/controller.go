@@ -703,16 +703,23 @@ func (c *Controller) stamp(after time.Time) time.Time {
 }
 
 // replicaID names a new placement's replica. An app with at most one
-// replica is one installation, so its replica is its resource UID: the same
-// on every host it moves to, which keeps its storage prefix, hint key, boot
-// generation and rollback floor (package bootfloor) with it. Only an app
-// that may run several replicas at once gets a fresh replica ID.
+// replica is one installation, so its replica is stable: the replica of an
+// existing placement (an installation placed before stable IDs keeps its
+// own), otherwise its resource UID. It is the same on every host it moves
+// to, which keeps its storage prefix, hint key, boot generation and
+// rollback floor (package bootfloor) with it. Only an app that may run
+// several replicas at once gets a fresh replica ID.
 func replicaID(w world, resourceUID string) (string, error) {
 	for _, app := range w.apps {
 		if app.UID != resourceUID {
 			continue
 		}
 		if spec, ok := app.Spec.(resource.AppSpec); ok && spec.MaxReplicas <= 1 {
+			for _, p := range w.placements {
+				if p.ResourceUID == resourceUID {
+					return p.Replica, nil
+				}
+			}
 			return resourceUID, nil
 		}
 	}

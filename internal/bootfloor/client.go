@@ -50,7 +50,11 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		return err
 	}
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("bootfloor: %s %s: %s", path, res.Status, strings.TrimSpace(string(data)))
+		msg := strings.TrimSpace(string(data))
+		if res.StatusCode == http.StatusConflict && strings.Contains(msg, ErrBehindHost.Error()) {
+			return fmt.Errorf("%w (%s)", ErrBehindHost, path)
+		}
+		return fmt.Errorf("bootfloor: %s %s: %s", path, res.Status, msg)
 	}
 	return json.Unmarshal(data, out)
 }
@@ -189,6 +193,9 @@ func (r *Reporter) Flush(ctx context.Context) {
 		}
 		if len(res.NotHeld) > 0 && r.Logger != nil {
 			r.Logger.Warn("controller says this host does not hold these installations; their reports were dropped", "installations", res.NotHeld)
+		}
+		if len(res.Ahead) > 0 && r.Logger != nil {
+			r.Logger.Error("ALERT: the controller is behind this host's floor incarnation for these installations; re-apply the lowering", "installations", res.Ahead)
 		}
 		batch = batch[n:]
 	}

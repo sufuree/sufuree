@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -70,7 +69,7 @@ func StoreFSM(st *store.Store) *raftnode.CommandFSM {
 
 // fsmSnapshot is the Raft snapshot: the control archive and the boot
 // floors. A snapshot that is a bare control archive (written before boot
-// floors existed) restores the archive and leaves the floors empty.
+// floors existed) restores the archive and keeps the local floors.
 type fsmSnapshot struct {
 	Control    json.RawMessage `json:"control"`
 	BootFloors json.RawMessage `json:"boot_floors"`
@@ -96,10 +95,10 @@ func restore(st *store.Store, b []byte) error {
 		return fmt.Errorf("controlraft: snapshot: %w", err)
 	}
 	if _, ok := probe["control"]; !ok {
-		if err := st.Import(bytes.NewReader(b)); err != nil {
-			return err
-		}
-		return st.ImportBootFloors(strings.NewReader("[]"))
+		// A bare archive from an agent that predates boot floors (for
+		// example an old leader during a rolling upgrade) says nothing about
+		// floors: keep this store's, never wipe them or their audit.
+		return st.Import(bytes.NewReader(b))
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()

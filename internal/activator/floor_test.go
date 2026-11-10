@@ -172,3 +172,66 @@ func TestRollbackIgnoresHintsFromBeforeIt(t *testing.T) {
 		t.Fatalf("boot after rollback = gen %d, MIN %q, %v; want 12, 5:2", gen, env["MIN"], err)
 	}
 }
+
+func TestBehindControllerRefusesTheBoot(t *testing.T) {
+	l := &fakeLauncher{}
+	f := &fakeFloor{err: bootfloor.ErrBehindHost}
+	a, _ := newFloorAct(t, l, &fakeHints{}, f)
+	if _, _, err := a.Acquire(context.Background()); !errors.Is(err, bootfloor.ErrBehindHost) && err == nil {
+		t.Fatal("booted while the controller is behind")
+	}
+	if l.count() != 0 {
+		t.Fatal("a guest was launched")
+	}
+}
+
+// TestShutdownWaitsForTheFinalProgress: when the agent stops, Run returns
+// only after the exit watcher has recorded and noted the final progress.
+func TestShutdownWaitsForTheFinalProgress(t *testing.T) {
+	l, h := &fakeLauncher{}, &fakeHints{}
+	f := &fakeFloor{gen: 5, inc: 1}
+	j, err := journal.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := spec()
+	w.ProgressEnvKey = "MIN"
+	a := New(w, j, l, h, Options{
+		Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond, Attempts: 1,
+		Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
+		Ready:  func(context.Context, string) error { return nil },
+		Floor:  f,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go a.Run(ctx)
+	_, release, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	h.set(wakehint.Hint{Version: 2, Generation: 6, Seq: 3, Progress: &wakehint.Progress{Epoch: 6, Seq: 77}})
+	cancel()
+	<-a.Done()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.notes) == 0 || f.notes[len(f.notes)-1].Seq != 77 || f.kicks == 0 {
+		t.Fatalf("Run returned before the final progress was noted: notes %+v, kicks %d", f.notes, f.kicks)
+	}
+}
+
+func TestBootSendsTheVerifiedHintGeneration(t *testing.T) {
+	l, h := &fakeLauncher{}, &fakeHints{}
+	f := &fakeFloor{inc: 1}
+	a, _ := newFloorAct(t, l, h, f)
+	a.opt.HintKey = make([]byte, wakehint.KeySize)
+	a.spec.HintKeyEnvKey = "HK"
+	h.set(wakehint.Hint{Version: 2, Generation: 33, Seq: 1})
+	if _, _, err := wakeAndStop(t, a, l); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.locals[0].Generation != 33 {
+		t.Fatalf("the boot request did not carry the hint's generation: %+v", f.locals[0])
+	}
+}
