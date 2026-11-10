@@ -155,8 +155,14 @@ func (j *Journal) Adopt(id string, g Grant) (Record, error) {
 	if g.Incarnation > have {
 		r.Incarnation, r.IncarnationFrom = g.Incarnation, g.IncarnationFrom
 		r.ProgressEpoch, r.ProgressSeq = g.Epoch, g.Seq
-	} else if g.Epoch > r.ProgressEpoch || (g.Epoch == r.ProgressEpoch && g.Seq > r.ProgressSeq) {
-		r.ProgressEpoch, r.ProgressSeq = g.Epoch, g.Seq
+	} else {
+		if g.Epoch > r.ProgressEpoch || (g.Epoch == r.ProgressEpoch && g.Seq > r.ProgressSeq) {
+			r.ProgressEpoch, r.ProgressSeq = g.Epoch, g.Seq
+		}
+		// The controller moves an incarnation's start up until its first
+		// progress (a stale guest elsewhere may have outrun an earlier
+		// start); it never moves down.
+		r.IncarnationFrom = max(r.IncarnationFrom, g.IncarnationFrom)
 	}
 	r.Incarnation = g.Incarnation
 	r.Generation = g.Generation

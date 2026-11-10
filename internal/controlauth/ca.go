@@ -181,11 +181,11 @@ func InitCAWrapped(ctx context.Context, dir string, validFor time.Duration, w Ke
 	if w == nil {
 		return writeExclusive(filepath.Join(dir, caKeyFile), keyPEM, 0o600)
 	}
-	ct, err := w.Wrap(ctx, keyPEM, wrapContext(der))
+	ct, keyID, err := w.Wrap(ctx, keyPEM, wrapContext(der))
 	if err != nil {
 		return err
 	}
-	blob, err := encodeWrapped(w.KeyID(), ct)
+	blob, err := encodeWrapped(keyID, ct)
 	if err != nil {
 		return err
 	}

@@ -78,7 +78,7 @@ func TestPlanLower(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Incarnation != 2 || !out.StartPending() || out.ProgressEpoch != 6 || out.ProgressSeq != 2 || out.Generation != 20 {
+	if out.Incarnation != 2 || !out.StartOpen || out.IncarnationFrom != 0 || out.ProgressEpoch != 6 || out.ProgressSeq != 2 || out.Generation != 20 {
 		t.Fatalf("lowered = %+v", out)
 	}
 	if l := out.Lowered; l == nil || l.FromIncarnation != 1 || l.FromEpoch != 19 || l.FromSeq != 8 {
@@ -90,8 +90,16 @@ func TestPlanLower(t *testing.T) {
 	c := Command{Kind: KindAllocate, Installation: "inst-1", Expect: 20, Local: &Entry{Incarnation: 1, Generation: 27, Epoch: 26, Seq: 1}}
 	if g, _, err := PlanAllocate(&out, c); err != nil || g.Incarnation != 2 || g.Generation != 28 || g.IncarnationFrom != 28 || g.ProgressEpoch != 6 {
 		t.Fatalf("first allocation after lowering = %+v, %v", g, err)
-	} else if g2, _, err := PlanAllocate(&g, Command{Kind: KindAllocate, Installation: "inst-1", Expect: 28}); err != nil || g2.IncarnationFrom != 28 {
-		t.Fatalf("a later allocation moved the incarnation start: %+v, %v", g2, err)
+	} else if g2, _, err := PlanAllocate(&g, Command{Kind: KindAllocate, Installation: "inst-1", Expect: 28}); err != nil || g2.IncarnationFrom != 29 || !g2.StartOpen {
+		// Before any progress, a later boot (say on another host that
+		// outran a stale guest's hint) moves the start up.
+		t.Fatalf("a boot before the first progress = %+v, %v", g2, err)
+	} else if g3, o := Merge(&g2, entry(2, 29, 29, 1)); o != Raised || g3.StartOpen {
+		t.Fatalf("first progress in the new incarnation = %+v, %v", g3, o)
+	} else if g4, _, err := PlanAllocate(&g3, Command{Kind: KindAllocate, Installation: "inst-1", Expect: 29}); err != nil || g4.IncarnationFrom != 29 {
+		t.Fatalf("an allocation after the first progress moved the start: %+v, %v", g4, err)
+	} else if g5, _ := Merge(&g2, entry(1, 40, 39, 1)); !g5.StartOpen {
+		t.Fatalf("an old-incarnation report closed the start: %+v", g5)
 	}
 	if _, err := PlanLower(r, lowering("owner@example.com", "Owner@example.com")); err == nil {
 		t.Fatal("one person both requested and approved a lowering")

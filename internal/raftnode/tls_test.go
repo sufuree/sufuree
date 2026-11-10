@@ -2,8 +2,8 @@ package raftnode
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,7 +103,7 @@ func TestTLSTransport(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go func() { _ = c.(*tls.Conn).Handshake(); _ = c.Close() }()
+			go func() { _, _ = c.Read(make([]byte, 1)); _ = c.Close() }()
 		}
 	}()
 	bad, err := so.Dial(raft.ServerAddress(s1.Addr().String()), 5*time.Second)
@@ -120,5 +120,42 @@ func TestTLSTransport(t *testing.T) {
 		t.Fatalf("a controller dialled an operator as its peer: %v", err)
 	} else if time.Since(start) > 3*time.Second {
 		t.Fatalf("refused only by timeout: %v", err)
+	}
+}
+
+func TestTLSAcceptDropsSilentClient(t *testing.T) {
+	dir := t.TempDir()
+	caDir := filepath.Join(dir, "ca")
+	if err := controlauth.InitCA(caDir, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	ca, err := controlauth.LoadCA(caDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := peerTLS(t, ca, filepath.Join(caDir, "ca.crt"), dir, controlauth.Principal{Role: controlauth.RoleController, Name: "c1"})
+	old := handshakeTimeout
+	handshakeTimeout = 300 * time.Millisecond
+	defer func() { handshakeTimeout = old }()
+	s, err := newTLSStream("127.0.0.1:0", c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	raw, err := net.Dial("tcp", s.Addr().String()) // connects, never handshakes
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	c, err := s.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("a silent client completed a handshake")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("silent client held the connection for %v", d)
 	}
 }

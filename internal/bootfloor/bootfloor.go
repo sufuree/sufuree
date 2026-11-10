@@ -186,6 +186,7 @@ func Merge(rec *resource.BootFloor, e Entry) (resource.BootFloor, Outcome) {
 	}
 	if progressBelow(out.ProgressEpoch, out.ProgressSeq, epoch, seq) {
 		out.ProgressEpoch, out.ProgressSeq, o = epoch, seq, Raised
+		out.StartOpen = false // the new incarnation has its first progress
 	}
 	return out, o
 }
@@ -223,7 +224,7 @@ func PlanAllocate(rec *resource.BootFloor, c Command) (resource.BootFloor, Outco
 		return resource.BootFloor{}, Unchanged, errors.New("bootfloor: generation exhausted")
 	}
 	out.Generation++
-	if out.StartPending() {
+	if out.StartOpen {
 		out.IncarnationFrom = out.Generation
 	}
 	return out, o, out.Validate()
@@ -253,7 +254,8 @@ func PlanLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 	}
 	out := rec
 	out.Incarnation = target
-	out.IncarnationFrom = 0 // StartPending: set by the next allocation
+	out.IncarnationFrom = 0 // set by each allocation while StartOpen
+	out.StartOpen = true
 	out.ProgressEpoch, out.ProgressSeq = l.Epoch, l.Seq
 	out.Lowered = &audit
 	out.Pending = nil

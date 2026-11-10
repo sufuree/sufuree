@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 
@@ -32,7 +33,7 @@ func runCA(args []string) error {
 		fs := flag.NewFlagSet("ca init", flag.ContinueOnError)
 		dir := fs.String("dir", "", "CA directory (created 0700)")
 		days := fs.Int("days", 3650, "CA validity in days")
-		kmsKey := fs.String("kms-key-id", "", "AWS KMS key (ID, ARN or alias) that wraps the CA key; required for PHI")
+		kmsKey := fs.String("kms-key-id", "", "AWS KMS key (ID, ARN or alias) that wraps the CA key; required for PHI. The key's ARN is recorded, so later issues don't depend on the alias")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -101,7 +102,13 @@ func runCA(args []string) error {
 
 // kmsWrapper builds a KMS key wrapper from the standard AWS environment.
 func kmsWrapper(ctx context.Context, key string) (controlauth.KeyWrapper, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	var opts []func(*awsconfig.LoadOptions) error
+	if a, err := arn.Parse(key); err == nil && a.Region != "" {
+		// A recorded key ARN names its region; use it whatever the
+		// environment's default region is.
+		opts = append(opts, awsconfig.WithRegion(a.Region))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}

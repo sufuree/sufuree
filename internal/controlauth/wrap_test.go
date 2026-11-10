@@ -52,14 +52,12 @@ func (f *fakeKMS) gcm() cipher.AEAD {
 	return g
 }
 
-func (f *fakeKMS) KeyID() string { return "alias/test" }
-
-func (f *fakeKMS) Wrap(_ context.Context, pt []byte, ec map[string]string) ([]byte, error) {
+func (f *fakeKMS) Wrap(_ context.Context, pt []byte, ec map[string]string) ([]byte, string, error) {
 	f.calls++
 	g := f.gcm()
 	nonce := make([]byte, g.NonceSize())
 	_, _ = rand.Read(nonce)
-	return g.Seal(nonce, nonce, pt, aad(ec)), nil
+	return g.Seal(nonce, nonce, pt, aad(ec)), "arn:aws:kms:us-west-1:000000000000:key/test", nil
 }
 
 func (f *fakeKMS) Unwrap(_ context.Context, ct []byte, ec map[string]string) ([]byte, error) {
@@ -91,7 +89,7 @@ func TestWrappedCA(t *testing.T) {
 	if st, _ := os.Stat(filepath.Join(dir, "ca.key.kms")); st.Mode().Perm() != 0o600 {
 		t.Fatalf("ca.key.kms mode %v", st.Mode().Perm())
 	}
-	if id, err := WrappedKeyID(dir); err != nil || id != "alias/test" {
+	if id, err := WrappedKeyID(dir); err != nil || id != "arn:aws:kms:us-west-1:000000000000:key/test" {
 		t.Fatalf("WrappedKeyID = %q, %v", id, err)
 	}
 	if err := InitCA(dir, time.Hour); err == nil {

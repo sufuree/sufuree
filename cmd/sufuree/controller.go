@@ -74,6 +74,12 @@ func runController(args []string) error {
 		return errors.New("--data-dir and --listen are required")
 	}
 	raftOn := *raftBind != "" || *raftID != "" || *raftBootstrap
+	// TLS is all or nothing, checked before Raft opens so a partial set
+	// never starts a plaintext peer transport.
+	authOn := *tlsCert != "" || *tlsKey != "" || *tlsClientCA != ""
+	if authOn && (*tlsCert == "" || *tlsKey == "" || *tlsClientCA == "") {
+		return errors.New("--tls-cert, --tls-key and --tls-client-ca must be set together")
+	}
 	if raftOn && (*raftBind == "" || *raftID == "") {
 		return errors.New("--raft-bind and --raft-id are required to enable raft")
 	}
@@ -116,7 +122,7 @@ func runController(args []string) error {
 		raftExisted := raftStat == nil
 		var err error
 		var peerTLS *raftnode.PeerTLS
-		if *tlsCert != "" && *tlsKey != "" && *tlsClientCA != "" {
+		if authOn {
 			srvTLS, cliTLS, terr := controlauth.PeerTLS(*tlsCert, *tlsKey, *tlsClientCA)
 			if terr != nil {
 				return terr
@@ -165,12 +171,8 @@ func runController(args []string) error {
 	if node != nil {
 		leader = node
 	}
-	authOn := *tlsCert != "" || *tlsKey != "" || *tlsClientCA != ""
 	srv := &http.Server{Handler: controlHandlerAuth(leader, c, floorJournal(*bootFloor, journal), authOn)}
 	if authOn {
-		if *tlsCert == "" || *tlsKey == "" || *tlsClientCA == "" {
-			return errors.New("--tls-cert, --tls-key and --tls-client-ca must be set together")
-		}
 		if srv.TLSConfig, err = controlauth.ServerTLS(*tlsCert, *tlsKey, *tlsClientCA); err != nil {
 			return err
 		}

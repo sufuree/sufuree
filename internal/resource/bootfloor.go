@@ -23,16 +23,20 @@ type BootFloor struct {
 	Incarnation  uint64 `json:"incarnation"`
 	// IncarnationFrom is the first generation issued in this incarnation
 	// (zero for the first incarnation). Progress from a hint published by
-	// an earlier generation belongs to data a lowering discarded. A
-	// lowering leaves it zero (StartPending) and the next allocation sets
-	// it to the H it issues: that H is above the holding host's own record,
-	// so a guest still running on discarded data, at a generation the
+	// an earlier generation belongs to data a lowering discarded. While
+	// StartOpen, every allocation moves it to the H it issues, which is
+	// above the allocating host's own record and verified hints: a guest
+	// still running on discarded data, on any host, at a generation the
 	// controller never heard of, cannot publish a hint inside the new
-	// incarnation.
-	IncarnationFrom uint64         `json:"incarnation_from,omitempty"`
-	ProgressEpoch   uint64         `json:"progress_epoch,omitempty"`
-	ProgressSeq     uint64         `json:"progress_seq,omitempty"`
-	Lowered         *FloorLowering `json:"lowered,omitempty"`
+	// incarnation once a later boot has outrun it.
+	IncarnationFrom uint64 `json:"incarnation_from,omitempty"`
+	// StartOpen is set by a lowering and cleared by the first progress
+	// recorded in the new incarnation (from a hint at or above
+	// IncarnationFrom, which hosts check).
+	StartOpen     bool           `json:"start_open,omitempty"`
+	ProgressEpoch uint64         `json:"progress_epoch,omitempty"`
+	ProgressSeq   uint64         `json:"progress_seq,omitempty"`
+	Lowered       *FloorLowering `json:"lowered,omitempty"`
 	// Pending is a requested lowering waiting for a second principal's
 	// approval (authenticated control API only).
 	Pending *PendingLowering `json:"pending,omitempty"`
@@ -156,7 +160,3 @@ func (l FloorLowering) Validate() error {
 	}
 	return nil
 }
-
-// StartPending reports whether the record's incarnation began with a
-// lowering and no generation has been issued in it yet.
-func (f BootFloor) StartPending() bool { return f.Incarnation > 1 && f.IncarnationFrom == 0 }
