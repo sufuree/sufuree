@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -235,6 +236,46 @@ func (n *Node) LeaderCh() <-chan bool {
 		return nil
 	}
 	return n.raft.LeaderCh()
+}
+
+// Barrier waits until every log entry committed before the call has been
+// applied to the local FSM. Use it before reading FSM state to stage a new
+// command so a freshly elected leader does not overwrite unapplied entries.
+func (n *Node) Barrier(ctx context.Context, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if n == nil || n.raft == nil || n.raft.State() != raft.Leader {
+		return ErrNotLeader
+	}
+	if timeout <= 0 {
+		return errors.New("raftnode: barrier timeout is required")
+	}
+	future := n.raft.Barrier(timeout)
+	errc := make(chan error, 1)
+	go func() { errc <- future.Error() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errc:
+		return wrapLeader(err)
+	}
+}
+
+// Term is the Raft term reported while this node is leader.
+func (n *Node) Term() (uint64, error) {
+	if n == nil || n.raft == nil || n.raft.State() != raft.Leader {
+		return 0, ErrNotLeader
+	}
+	s := n.raft.Stats()["term"]
+	if s == "" {
+		return 0, errors.New("raftnode: term is unavailable")
+	}
+	term, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("raftnode: term: %w", err)
+	}
+	return term, nil
 }
 
 // Apply proposes cmd to the log. It returns ErrNotLeader when this node is
