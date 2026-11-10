@@ -115,11 +115,22 @@ func runController(args []string) error {
 		_, raftStat := os.Stat(raftDir)
 		raftExisted := raftStat == nil
 		var err error
+		var peerTLS *raftnode.PeerTLS
+		if *tlsCert != "" && *tlsKey != "" && *tlsClientCA != "" {
+			srvTLS, cliTLS, terr := controlauth.PeerTLS(*tlsCert, *tlsKey, *tlsClientCA)
+			if terr != nil {
+				return terr
+			}
+			peerTLS = &raftnode.PeerTLS{Server: srvTLS, Client: cliTLS}
+		} else {
+			log.Warn("raft peers without TLS: development only, not for PHI")
+		}
 		node, err = raftnode.Open(raftnode.Config{
 			DataDir:   raftDir,
 			NodeID:    *raftID,
 			BindAddr:  *raftBind,
 			Bootstrap: *raftBootstrap,
+			TLS:       peerTLS,
 		}, controlraft.StoreFSM(st))
 		if err != nil {
 			_ = st.Close()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -8,13 +9,19 @@ import (
 	"strings"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+
 	"github.com/sufuree/sufuree/internal/controlauth"
 )
 
-// runCA manages the controller CA (local file custody; development and
-// local qualification only until KMS custody lands).
+// runCA manages the controller CA. With --kms-key-id the CA key exists
+// on disk only wrapped by that AWS KMS key (required for PHI); without it
+// the key is a local 0600 file (development and local qualification).
+// AWS credentials and region come from the standard AWS environment and
+// shared config, never from flags.
 //
-//	sufuree ca init --dir D [--days 3650]
+//	sufuree ca init --dir D [--days 3650] [--kms-key-id alias/sufuree-ca]
 //	sufuree ca issue --dir D --role R --name N --out PREFIX [--server-name a,b] [--days 30]
 func runCA(args []string) error {
 	if len(args) == 0 {
@@ -25,13 +32,22 @@ func runCA(args []string) error {
 		fs := flag.NewFlagSet("ca init", flag.ContinueOnError)
 		dir := fs.String("dir", "", "CA directory (created 0700)")
 		days := fs.Int("days", 3650, "CA validity in days")
+		kmsKey := fs.String("kms-key-id", "", "AWS KMS key (ID, ARN or alias) that wraps the CA key; required for PHI")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		if *dir == "" || *days <= 0 {
 			return errors.New("--dir is required")
 		}
-		if err := controlauth.InitCA(*dir, time.Duration(*days)*24*time.Hour); err != nil {
+		ctx := context.Background()
+		var w controlauth.KeyWrapper
+		if *kmsKey != "" {
+			var err error
+			if w, err = kmsWrapper(ctx, *kmsKey); err != nil {
+				return err
+			}
+		}
+		if err := controlauth.InitCAWrapped(ctx, *dir, time.Duration(*days)*24*time.Hour, w); err != nil {
 			return err
 		}
 		fmt.Fprintln(os.Stdout, "created", *dir+"/ca.crt")
@@ -50,7 +66,18 @@ func runCA(args []string) error {
 		if *dir == "" || *role == "" || *name == "" || *out == "" {
 			return errors.New("--dir, --role, --name and --out are required")
 		}
-		ca, err := controlauth.LoadCA(*dir)
+		ctx := context.Background()
+		var w controlauth.KeyWrapper
+		if controlauth.Wrapped(*dir) {
+			id, err := controlauth.WrappedKeyID(*dir)
+			if err != nil {
+				return err
+			}
+			if w, err = kmsWrapper(ctx, id); err != nil {
+				return err
+			}
+		}
+		ca, err := controlauth.LoadCAWrapped(ctx, *dir, w)
 		if err != nil {
 			return err
 		}
@@ -70,4 +97,13 @@ func runCA(args []string) error {
 	default:
 		return fmt.Errorf("unknown ca command %q", args[0])
 	}
+}
+
+// kmsWrapper builds a KMS key wrapper from the standard AWS environment.
+func kmsWrapper(ctx context.Context, key string) (controlauth.KeyWrapper, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &controlauth.KMSWrapper{Client: kms.NewFromConfig(cfg), Key: key}, nil
 }

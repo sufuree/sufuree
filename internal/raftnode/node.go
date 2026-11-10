@@ -48,6 +48,9 @@ type Config struct {
 	NodeID    string
 	BindAddr  string
 	Bootstrap bool
+	// TLS, when set, runs the Raft transport over mutually authenticated
+	// TLS. Nil keeps plain TCP (development only).
+	TLS *PeerTLS
 }
 
 func (c Config) validate() error {
@@ -137,9 +140,18 @@ func Open(cfg Config, fsm raft.FSM) (*Node, error) {
 		return nil, fmt.Errorf("%w; store opened without a term, log, or snapshot", ErrRecoveryRequired)
 	}
 
-	transport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, nil, 3, 10*time.Second, logger)
-	if err != nil {
-		return nil, err
+	var transport *raft.NetworkTransport
+	if cfg.TLS != nil {
+		stream, err := newTLSStream(cfg.BindAddr, cfg.TLS)
+		if err != nil {
+			return nil, err
+		}
+		transport = raft.NewNetworkTransportWithLogger(stream, 3, 10*time.Second, logger)
+	} else {
+		transport, err = raft.NewTCPTransportWithLogger(cfg.BindAddr, nil, 3, 10*time.Second, logger)
+		if err != nil {
+			return nil, err
+		}
 	}
 	n.transport = transport
 

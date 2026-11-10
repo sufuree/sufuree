@@ -1,0 +1,7 @@
+name: sufuree-infra
+runtime: go
+description: Sufuree infrastructure. Currently the KMS key that wraps the controller CA key (RFC-0001 envelope custody).
+config:
+  sufuree-infra:operatorArn:
+    type: string
+    description: IAM principal ARN that runs `sufuree ca init|issue` (may encrypt and decrypt with the CA wrapping key).

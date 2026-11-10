@@ -122,7 +122,7 @@ func certPool(caFile string) (*x509.CertPool, error) {
 // ServerTLS is the control API's TLS: its own certificate, TLS 1.3, and a
 // required client certificate from the controller CA.
 func ServerTLS(certFile, keyFile, clientCAFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := loadKeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -158,15 +158,7 @@ func (f TLSFlags) Client(baseURL string) (*http.Client, error) {
 	if f.Cert == "" || f.Key == "" || f.CA == "" {
 		return nil, errors.New("an https:// controller needs --tls-cert, --tls-key and --tls-ca")
 	}
-	keyPEM, err := readPrivate(f.Key)
-	if err != nil {
-		return nil, err
-	}
-	certPEM, err := os.ReadFile(f.Cert)
-	if err != nil {
-		return nil, err
-	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := loadKeyPair(f.Cert, f.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -177,4 +169,66 @@ func (f TLSFlags) Client(baseURL string) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, RootCAs: pool}
 	return &http.Client{Transport: tr}, nil
+}
+
+// loadKeyPair loads a certificate and its key; the key must be a regular
+// 0600 file, opened without following a symlink.
+func loadKeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	keyPEM, err := readPrivate(keyFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// PeerTLS returns the Raft peer TLS configs: TLS 1.3 both ways, this
+// controller's certificate, and a peer that must present a certificate
+// from the controller CA naming a controller principal. Peers are dialled
+// by address, so the peer is verified by CA and role, not host name.
+func PeerTLS(certFile, keyFile, caFile string) (server, client *tls.Config, err error) {
+	cert, err := loadKeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	pool, err := certPool(caFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	verify := func(usage x509.ExtKeyUsage) func(tls.ConnectionState) error {
+		return func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("controlauth: raft peer sent no certificate")
+			}
+			inter := x509.NewCertPool()
+			for _, c := range cs.PeerCertificates[1:] {
+				inter.AddCert(c)
+			}
+			if _, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
+				return fmt.Errorf("controlauth: raft peer: %w", err)
+			}
+			p, err := FromCert(cs.PeerCertificates[0])
+			if err != nil {
+				return err
+			}
+			if p.Role != RoleController {
+				return fmt.Errorf("controlauth: raft peer %s is not a controller", p)
+			}
+			return nil
+		}
+	}
+	server = &tls.Config{
+		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert},
+		ClientAuth:       tls.RequireAnyClientCert,
+		VerifyConnection: verify(x509.ExtKeyUsageClientAuth),
+	}
+	client = &tls.Config{
+		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert},
+		InsecureSkipVerify: true, // replaced by VerifyConnection: CA and role, not host name
+		VerifyConnection:   verify(x509.ExtKeyUsageServerAuth),
+	}
+	return server, client, nil
 }
