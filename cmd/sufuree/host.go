@@ -18,6 +18,7 @@ import (
 
 	"github.com/sufuree/sufuree/internal/activator"
 	"github.com/sufuree/sufuree/internal/bootcred"
+	"github.com/sufuree/sufuree/internal/bootfloor"
 	"github.com/sufuree/sufuree/internal/gateway"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
@@ -32,6 +33,8 @@ func runHost(args []string) error {
 	tick := fs.Duration("tick", time.Second, "control loop period")
 	controllerURL := fs.String("controller", "", "optional control API base URL for assignment pull and credential authorize")
 	hostUID := fs.String("host-id", "", "this host's control-plane UID; required with --controller")
+	bootFloor := fs.Bool("boot-floor", false, "take every boot generation and rollback floor from the controller and report progress to it; needs --controller")
+	floorEvery := fs.Duration("floor-report", bootfloor.DefaultInterval, "how often progress is reported to the controller with --boot-floor")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -40,6 +43,9 @@ func runHost(args []string) error {
 	}
 	if (*controllerURL == "") != (*hostUID == "") {
 		return errors.New("--controller and --host-id must be set together")
+	}
+	if *bootFloor && *controllerURL == "" {
+		return errors.New("--boot-floor needs --controller and --host-id")
 	}
 	cfg, err := workload.Load(*cfgPath)
 	if err != nil {
@@ -102,6 +108,33 @@ func runHost(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// With --boot-floor, the controller is the authority for every boot
+	// generation and rollback floor; boots fail closed without it. The
+	// reporter outlives the activators so their exit reports are sent.
+	var floor *bootfloor.Host
+	if *bootFloor {
+		client := &bootfloor.Client{BaseURL: *controllerURL, HostUID: *hostUID}
+		floor = &bootfloor.Host{Client: client, Reporter: &bootfloor.Reporter{Client: client, Interval: *floorEvery, Logger: log}}
+		// Enrolment: report every workload's local record once, so the
+		// controller's records start at or above this host's.
+		for _, w := range cfg.Workloads {
+			r, err := j.Get(w.ID)
+			if err != nil {
+				return fmt.Errorf("workload %s: journal: %w", w.ID, err)
+			}
+			if r.Generation > 0 {
+				floor.Note(bootfloor.Entry{Installation: w.ID, Incarnation: r.Incarnation, IncarnationFrom: r.IncarnationFrom,
+					Generation: r.Generation, Epoch: r.ProgressEpoch, Seq: r.ProgressSeq})
+			}
+		}
+		reportCtx, stopReports := context.WithCancel(context.Background())
+		reporterDone := make(chan struct{})
+		go func() { defer close(reporterDone); floor.Reporter.Run(reportCtx) }()
+		floor.Kick() // send the enrolment report now
+		defer func() { stopReports(); <-reporterDone }()
+		log.Info("boot generations and floors from the controller", "controller", *controllerURL, "host", *hostUID, "report_every", *floorEvery)
+	}
+
 	var wg sync.WaitGroup
 	errs := make(chan error, len(cfg.Workloads))
 	for _, w := range cfg.Workloads {
@@ -116,6 +149,9 @@ func runHost(args []string) error {
 			log.Warn("some processes could not be checked for a leftover guest", "workload", w.ID, "unreadable", unreadable)
 		}
 		opt := activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer}
+		if floor != nil {
+			opt.Floor = floor
+		}
 		wh := hints
 		if w.HintKeyEnvKey != "" {
 			key, err := wakehint.LoadOrCreateKey(filepath.Join(cfg.DataDir, "hintkeys"), w.ID)

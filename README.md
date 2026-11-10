@@ -150,6 +150,55 @@ version 2, which an older agent refuses rather than rewrite without it. To
 clear the floor (a forged value, or an intentional rollback of the
 workload's store), stop the agent and remove `progress_epoch` and
 `progress_seq` from `data_dir/journal/<id>.json`, keeping `generation`.
+That host-local journal is for development and single-host use only: it is
+lost with the host, and a replacement host starts generations at 1 with no
+floor.
+
+### Boot generations and floors on the controller
+
+With `sufuree controller --boot-floor` and `sufuree host --controller URL
+--host-id ID --boot-floor`, the controller is the authority for each
+installation's boot generation and rollback floor (Zati RFC 007 §7.4, option
+A), so both survive the loss of any host. Production PHI workloads need this.
+
+- **Identity.** An app with `max_replicas` at most 1 is one installation, and
+  its placements' replica is its resource UID on every host. The host config's
+  workload `id` must be that UID. Apps that can run more replicas keep fresh
+  replica IDs and are not covered.
+- **Boot.** Every boot asks the controller for a grant
+  (`POST /v1/hosts/{id}/boot/{installation}`), which commits the next
+  generation as its own Raft entry. The request carries the host's own record,
+  merged first. There is no cached fallback: a host that can't reach the
+  controller doesn't boot. The host journal caches the grant and refuses a
+  generation that isn't above its own record.
+- **Reports.** The host reads an awake workload's hint every minute (owner
+  decision) and sends one batched report a minute (`--floor-report`), with
+  only the installations that changed, plus a report at every guest exit and
+  clean stop. After the loss of a host, the floor covers only up to its last
+  report.
+- **Incarnations.** The floor only rises within an incarnation. Reports from an
+  older incarnation are dropped, so a host that missed a rollback can't raise
+  the floor back. A host record with a newer incarnation means the controller
+  is behind (for example, restored from a backup taken before a rollback). The
+  record is rebuilt from the host's without lowering the generation, and the
+  host logs an alert.
+- **Intentional rollback.** `POST /v1/installations/{id}/floor/lower` with
+  `expect_incarnation`, `epoch`, `seq`, `requested_by` (the installation
+  owner), `approved_by` (a different Zati operator), `reason` and `reference`.
+  It records the audit, starts a new incarnation, and sets the floor to the
+  given mark exactly. That mark must be the restored lease's (data
+  generation, TXID). The controller can't read the lease itself, so the
+  restore tooling supplies it. Hosts ignore hint progress from generations
+  before the new incarnation. `GET /v1/installations/{id}/floor` returns the
+  record.
+- **Raft.** Floor records live in their own bucket and are written by a
+  `boot_floor` command, not by `restore_store`, so placement changes neither
+  ship nor overwrite them. Raft snapshots carry both.
+- **Not yet safe for PHI.** The control API doesn't authenticate hosts: the
+  host ID in the path is taken on trust. Anyone who can reach the API could
+  raise a floor (stalling boots) or use up generations. Host authentication is
+  the next change. Until it lands, both flags are off by default and the
+  controller logs a warning.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.

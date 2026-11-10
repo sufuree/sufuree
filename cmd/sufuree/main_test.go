@@ -223,3 +223,10 @@ func putControl(t *testing.T, url, body string) *http.Response {
 	}
 	return res
 }
+
+func TestHostBootFloorNeedsController(t *testing.T) {
+	err := runHost([]string{"--config", "unused.json", "--boot-floor"})
+	if err == nil || !strings.Contains(err.Error(), "--boot-floor needs --controller") {
+		t.Fatalf("err = %v", err)
+	}
+}

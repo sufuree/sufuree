@@ -66,6 +66,11 @@ func TestConcurrentDemandOneCapacityAndIdleZero(t *testing.T) {
 	if placements[0].ResourceUID != app.UID || placements[0].HostUID != hosts[0].UID {
 		t.Fatalf("placement %+v host %+v", placements[0], hosts[0])
 	}
+	// A single-replica app is one installation: its replica is its UID on
+	// every host, so its storage and boot floor follow it.
+	if placements[0].Replica != app.UID {
+		t.Fatalf("replica = %q, want the resource UID %q", placements[0].Replica, app.UID)
+	}
 	if pool.UID != hosts[0].PoolUID {
 		t.Fatalf("host pool = %s", hosts[0].PoolUID)
 	}
@@ -377,4 +382,19 @@ func listPlacements(t *testing.T, st *store.Store) []resource.Placement {
 
 func discard() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestReplicaIDIsStableOnlyForSingleReplicaApps(t *testing.T) {
+	app := func(uid string, max int) resource.Resource {
+		return resource.Resource{UID: uid, Kind: resource.KindApp, Spec: resource.AppSpec{MaxReplicas: max}}
+	}
+	w := world{apps: []resource.Resource{app("one", 1), app("many", 4)}}
+	if got, err := replicaID(w, "one"); err != nil || got != "one" {
+		t.Fatalf("single-replica app: %q, %v", got, err)
+	}
+	a, _ := replicaID(w, "many")
+	b, _ := replicaID(w, "many")
+	if a == b || a == "many" || a[0] != 'r' {
+		t.Fatalf("multi-replica app replicas %q, %q are not fresh", a, b)
+	}
 }

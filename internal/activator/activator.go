@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sufuree/sufuree/internal/bootcred"
+	"github.com/sufuree/sufuree/internal/bootfloor"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
 	"github.com/sufuree/sufuree/internal/wakehint"
@@ -72,7 +73,26 @@ type Options struct {
 	// HintKey is the workload's hint key (hint_key_env_key), passed to
 	// every boot. A boot of such a workload fails without it.
 	HintKey []byte
+	// Floor, when set, makes the controller the authority for the boot
+	// generation and the rollback floor (package bootfloor): every boot
+	// asks it for a fresh grant and fails closed without one, and recorded
+	// progress is reported to it. Nil keeps the host-local journal, for
+	// development and single-host use only.
+	Floor FloorAuthority
+	// FloorRead is how often an awake workload's hint is read so its
+	// progress reaches the controller (default bootfloor.DefaultInterval).
+	FloorRead time.Duration
 }
+
+// FloorAuthority is the controller's boot-floor service as a host sees it.
+type FloorAuthority interface {
+	Boot(ctx context.Context, installation string, local bootfloor.Entry) (bootfloor.Grant, error)
+	Note(e bootfloor.Entry)
+	Kick()
+}
+
+// FloorGrantTimeout bounds one boot grant request.
+const FloorGrantTimeout = 10 * time.Second
 
 // Activator manages one workload.
 type Activator struct {
@@ -93,7 +113,10 @@ type Activator struct {
 	lastActive time.Time
 	awakeSince time.Time
 	lastHintAt time.Time
-	closed     bool // shutting down: no new leases or wakes
+	// lastFloorRead is when an awake workload's progress was last read
+	// for the controller.
+	lastFloorRead time.Time
+	closed        bool // shutting down: no new leases or wakes
 	// A hint wakes a sleeping workload once per trigger (a busy hint's
 	// generation, or a next_due instant), so a guest that never updates
 	// its hint is not woken, idle-stopped and woken again forever. A
@@ -257,7 +280,7 @@ func (a *Activator) wake(done chan struct{}, scheduled bool) {
 }
 
 func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
-	gen, err := a.journal.NextGeneration(a.spec.ID) // durable before boot
+	gen, err := a.issueGeneration() // durable before boot
 	if err != nil {
 		return nil, 0, fmt.Errorf("issue generation: %w", err)
 	}
@@ -338,6 +361,52 @@ func WakeBudget(w workload.Spec, attempts int) time.Duration {
 	return time.Duration(attempts) * per
 }
 
+// issueGeneration returns the generation for the next boot, durable in the
+// host journal. With a controller it is a fresh grant, merged with this
+// host's record first; there is no fallback when the controller is
+// unreachable.
+func (a *Activator) issueGeneration() (uint64, error) {
+	if a.opt.Floor == nil {
+		return a.journal.NextGeneration(a.spec.ID)
+	}
+	r, err := a.journal.Get(a.spec.ID)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), FloorGrantTimeout)
+	defer cancel()
+	g, err := a.opt.Floor.Boot(ctx, a.spec.ID, entryOf(a.spec.ID, r))
+	if err != nil {
+		return 0, fmt.Errorf("controller boot grant: %w", err)
+	}
+	if g.Rebuilt {
+		a.log.Error("ALERT: the controller's boot floor was behind this host's newer incarnation and was rebuilt from it; check for a controller restore",
+			"incarnation", g.Incarnation, "generation", g.Generation)
+	}
+	nr, err := a.journal.Adopt(a.spec.ID, journal.Grant{
+		Generation: g.Generation, Incarnation: g.Incarnation, IncarnationFrom: g.IncarnationFrom,
+		Epoch: g.ProgressEpoch, Seq: g.ProgressSeq,
+	})
+	if err != nil {
+		if errors.Is(err, journal.ErrNewerLocalIncarnation) {
+			a.log.Error("ALERT: refusing a boot: the controller granted an older floor incarnation than this host holds", "err", err)
+		}
+		return 0, err
+	}
+	if r.Incarnation != 0 && nr.Incarnation > r.Incarnation {
+		a.log.Warn("floor incarnation changed (an intentional rollback); hints from earlier generations are ignored",
+			"incarnation", nr.Incarnation, "from_generation", nr.IncarnationFrom)
+	}
+	return g.Generation, nil
+}
+
+func entryOf(id string, r journal.Record) bootfloor.Entry {
+	return bootfloor.Entry{
+		Installation: id, Incarnation: r.Incarnation, IncarnationFrom: r.IncarnationFrom,
+		Generation: r.Generation, Epoch: r.ProgressEpoch, Seq: r.ProgressSeq,
+	}
+}
+
 // issueCredentials adds this generation's scoped credentials to env.
 func (a *Activator) issueCredentials(gen uint64, env map[string]string) error {
 	if a.opt.Credentials == nil {
@@ -389,9 +458,18 @@ func (a *Activator) noteProgress(h wakehint.Hint) error {
 			"hint_generation", h.Generation, "epoch", h.Progress.Epoch, "issued", r.Generation)
 		return nil
 	}
+	// After an intentional rollback, a hint published before the new
+	// incarnation's first generation describes the discarded data.
+	if h.Generation < r.IncarnationFrom {
+		return nil
+	}
 	prev, up, err := a.journal.AdvanceProgress(a.spec.ID, h.Progress.Epoch, h.Progress.Seq)
 	if up && h.Progress.Epoch != prev.Epoch {
 		a.log.Info("progress epoch advanced", "epoch", h.Progress.Epoch, "seq", h.Progress.Seq)
+	}
+	if err == nil && up && a.opt.Floor != nil {
+		r.ProgressEpoch, r.ProgressSeq = h.Progress.Epoch, h.Progress.Seq
+		a.opt.Floor.Note(entryOf(a.spec.ID, r))
 	}
 	return err
 }
@@ -438,6 +516,9 @@ func (a *Activator) watchExit(g guest.Guest, gen uint64) {
 		if err := a.recordProgress(ctx); err != nil {
 			a.log.Warn("recording progress after exit", "err", err)
 		}
+		if a.opt.Floor != nil {
+			a.opt.Floor.Kick() // report at guest exit and clean stop
+		}
 		cancel()
 	}
 }
@@ -463,6 +544,7 @@ func (a *Activator) Run(ctx context.Context) {
 func (a *Activator) Done() <-chan struct{} { return a.done }
 
 func (a *Activator) tick(ctx context.Context) {
+	a.readProgressWhileAwake(ctx)
 	a.mu.Lock()
 	state, active, gen := a.state, a.active, a.generation
 	idleFor, upFor := time.Since(a.lastActive), time.Since(a.awakeSince)
@@ -525,6 +607,32 @@ func (a *Activator) tick(ctx context.Context) {
 			a.beginWake(true)
 		}
 		a.mu.Unlock()
+	}
+}
+
+// readProgressWhileAwake reads an awake workload's hint once per FloorRead,
+// so its progress reaches the controller while it runs.
+func (a *Activator) readProgressWhileAwake(ctx context.Context) {
+	if a.opt.Floor == nil || a.spec.ProgressEnvKey == "" {
+		return
+	}
+	every := a.opt.FloorRead
+	if every <= 0 {
+		every = bootfloor.DefaultInterval
+	}
+	a.mu.Lock()
+	due := a.state == Awake && time.Since(a.lastFloorRead) >= every
+	if due {
+		a.lastFloorRead = time.Now()
+	}
+	a.mu.Unlock()
+	if !due {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, ProgressReadTimeout)
+	defer cancel()
+	if err := a.recordProgress(rctx); err != nil {
+		a.log.Warn("reading progress while awake", "err", err)
 	}
 }
 

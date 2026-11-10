@@ -99,6 +99,9 @@ func Open(path string) (*Store, error) {
 				return err
 			}
 		}
+		if err := ensureBootFloorBucket(tx); err != nil {
+			return err
+		}
 		return tx.ensureSchema()
 	})
 	if err != nil {
