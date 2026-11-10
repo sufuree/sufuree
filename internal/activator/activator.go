@@ -376,8 +376,9 @@ func (a *Activator) noteProgress(h wakehint.Hint) error {
 	if h.Progress == nil {
 		return nil
 	}
-	// Progress is unauthenticated, but it can be bounded: a hint naming a
-	// generation this host never issued is forged or from another host,
+	// Progress comes only from signed hints (the spec requires a hint key
+	// with progress_env_key). It is also bounded: a hint naming a generation
+	// this host never issued is from another host or a misbehaving guest,
 	// and would otherwise block every boot.
 	r, err := a.journal.Get(a.spec.ID)
 	if err != nil {

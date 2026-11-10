@@ -98,7 +98,10 @@ type Spec struct {
 	HintPrefix string `json:"hint_prefix,omitempty"`
 	// ProgressEnvKey, when set, receives the highest progress the hints
 	// have reported, as "<epoch>:<seq>", on every boot after the first
-	// report (see wakehint.Progress). Requires hint_prefix.
+	// report (see wakehint.Progress). Requires hint_prefix and
+	// hint_key_env_key: the guest refuses to boot below that progress, so
+	// it is taken only from signed hints, or anyone who can write the hint
+	// store could block every boot with a forged one.
 	ProgressEnvKey string `json:"progress_env_key,omitempty"`
 	// HintKeyEnvKey, when set, receives this workload's hint key (hex),
 	// generated and kept by the host, on every boot; the host then accepts
@@ -207,6 +210,8 @@ func (w Spec) validate() error {
 		return bad("idle_timeout and startup_timeout must be positive")
 	case w.ProgressEnvKey != "" && w.HintPrefix == "":
 		return bad("progress_env_key needs hint_prefix")
+	case w.ProgressEnvKey != "" && w.HintKeyEnvKey == "":
+		return bad("progress_env_key needs hint_key_env_key (progress is taken only from signed hints)")
 	case strings.ContainsAny(w.ProgressEnvKey, "=\n\r"), w.ProgressEnvKey != "" && w.ProgressEnvKey == w.GenerationEnvKey:
 		return bad("progress_env_key must be a plain key other than generation_env_key")
 	}

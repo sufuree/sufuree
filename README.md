@@ -127,17 +127,19 @@ the agent creates a per-workload HMAC key under `data_dir/hintkeys/` (0600,
 never in the hint store), passes it in each boot env, and accepts only version-2
 envelopes whose MAC verifies for that workload's `hint_prefix`. Unsigned,
 altered, or older signed hints are refused; the agent keeps the last authentic
-hint in memory (so deleting `wake.json` cannot force a stop). The in-memory
-replay floor resets on agent restart: a MAC-valid older hint can be accepted
-once until a newer authentic hint is seen. There is no key rotation yet.
+hint (so deleting `wake.json` cannot force a stop) and records it in
+`data_dir/hintkeys/<id>.last` (0600), verified again on restart, so an agent
+restart does not let an older signed hint be replayed. If that record cannot be
+read or written the agent logs it and carries on, and the next restart may accept
+one older hint. There is no key rotation yet.
 A hint may also report `progress`, an (`epoch`, `seq`) position the workload
 says is durably committed. With `progress_env_key`, the agent keeps the highest
 progress it has read (from every hint read, before each boot, and right after
 each guest exits) in its journal and passes it to every boot as
 `<epoch>:<seq>`. The workload can then refuse a store that was rolled back
-behind it, which the store alone cannot show. When hints are signed, progress
-inside the envelope is MAC-protected; without a hint key a forged higher value
-can keep the workload from booting, never make it accept less. Progress
+behind it, which the store alone cannot show. `progress_env_key` requires
+`hint_key_env_key`, so progress always comes from signed, MAC-protected hints:
+an unsigned forged higher value could keep the workload from booting. Progress
 reported after the agent's last read is not covered.
 Progress whose epoch, or whose hint generation, is above the highest
 generation the agent has issued is ignored with a warning, so a forged value
