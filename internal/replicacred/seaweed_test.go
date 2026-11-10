@@ -97,9 +97,15 @@ func TestSeaweedFS(t *testing.T) {
 			t.Errorf("%s: %s, want AccessDenied", name, c)
 		}
 	}
-	_, err = client(ca).ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket)})
-	if c := code(err); c != "AccessDenied" {
-		t.Errorf("a lists the bucket: %s, want AccessDenied", c)
+	for name, prefix := range map[string]*string{"the bucket": nil, "b's prefix": aws.String(Prefix(b) + "/")} {
+		_, err = client(ca).ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: prefix})
+		if c := code(err); c != "AccessDenied" {
+			t.Errorf("a lists %s: %s, want AccessDenied", name, c)
+		}
+	}
+	// A dot-dot key is refused outright, whatever it would resolve to.
+	if c := code(get(ca, Prefix(a)+"/../"+b+"/x")); c == "OK" {
+		t.Errorf("a read b's object through a .. key")
 	}
 
 	// Rotation: the next version's registration revokes the old key.

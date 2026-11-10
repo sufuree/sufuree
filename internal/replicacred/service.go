@@ -78,9 +78,14 @@ func NewService(d *Deriver, r Registrar, bucket string, recheck time.Duration) (
 		registered: map[string]time.Time{}, inflight: map[string]*call{}}, nil
 }
 
+// RegisterTimeout bounds one registration, including the probe.
+const RegisterTimeout = 30 * time.Second
+
 // Issue returns installation's credentials, registered with the store. The
 // caller must already have checked the requester may have them.
-// Concurrent calls for one installation share one registration.
+// Concurrent calls for one installation share one registration. It runs
+// under its own timeout, not the first caller's context, so a caller that
+// gives up neither fails the others nor leaves a half-done registration.
 func (s *Service) Issue(ctx context.Context, installation string) (Credentials, error) {
 	c, err := s.deriver.For(installation)
 	if err != nil {
@@ -91,34 +96,38 @@ func (s *Service) Issue(ctx context.Context, installation string) (Credentials, 
 		s.mu.Unlock()
 		return c, nil
 	}
-	if cl, ok := s.inflight[installation]; ok {
-		s.mu.Unlock()
-		select {
-		case <-cl.done:
-		case <-ctx.Done():
-			return Credentials{}, ctx.Err()
-		}
-		if cl.err != nil {
-			return Credentials{}, cl.err
-		}
-		return c, nil
-	}
-	cl := &call{done: make(chan struct{})}
-	s.inflight[installation] = cl
-	s.mu.Unlock()
-
-	cl.err = s.register(ctx, installation, c)
-	s.mu.Lock()
-	delete(s.inflight, installation)
-	if cl.err == nil {
-		s.registered[installation] = time.Now()
+	cl, ok := s.inflight[installation]
+	if !ok {
+		cl = &call{done: make(chan struct{})}
+		s.inflight[installation] = cl
+		go s.run(context.WithoutCancel(ctx), installation, c, cl)
 	}
 	s.mu.Unlock()
-	close(cl.done)
+	select {
+	case <-cl.done:
+	case <-ctx.Done():
+		return Credentials{}, ctx.Err()
+	}
 	if cl.err != nil {
 		return Credentials{}, cl.err
 	}
 	return c, nil
+}
+
+// run registers installation once and releases every waiter. It ends
+// within RegisterTimeout.
+func (s *Service) run(ctx context.Context, installation string, c Credentials, cl *call) {
+	ctx, cancel := context.WithTimeout(ctx, RegisterTimeout)
+	defer cancel()
+	err := s.register(ctx, installation, c)
+	s.mu.Lock()
+	cl.err = err
+	delete(s.inflight, installation)
+	if err == nil {
+		s.registered[installation] = time.Now()
+	}
+	s.mu.Unlock()
+	close(cl.done)
 }
 
 func (s *Service) register(ctx context.Context, installation string, c Credentials) error {

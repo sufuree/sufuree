@@ -110,6 +110,8 @@ func HandlerWith(c *Controller, replica ReplicaIssuer) http.Handler {
 // host must use when assuming the guest role locally.
 type credentialRequest struct {
 	RequestedTags map[string]string `json:"requested_tags,omitempty"`
+	// Replica asks for the installation's replica credentials too.
+	Replica bool `json:"replica,omitempty"`
 }
 
 type credentialResponse struct {
@@ -157,7 +159,17 @@ func postCredentials(c *Controller, replica ReplicaIssuer, w http.ResponseWriter
 		return
 	}
 	out := credentialResponse{Installation: installation, SessionTags: tags}
-	if replica != nil {
+	if req.Replica {
+		if replica == nil {
+			http.Error(w, "this controller issues no replica credentials (--replica-credentials)", http.StatusServiceUnavailable)
+			return
+		}
+		// Placement replica IDs are already narrower than this; it guards
+		// against that changing.
+		if err := replicacred.ValidInstallation(installation); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		// Only after Authorize: the host holds this installation.
 		creds, err := replica.Issue(r.Context(), installation)
 		if err != nil {

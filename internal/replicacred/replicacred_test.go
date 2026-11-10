@@ -332,3 +332,46 @@ func TestServiceReturnsNoCredentialsWhenRegistrationFails(t *testing.T) {
 		t.Fatal("a failed registration was remembered as done")
 	}
 }
+
+type ctxRegistrar struct {
+	entered chan struct{}
+	gate    chan struct{}
+	ctxs    chan error
+}
+
+func (r *ctxRegistrar) Register(ctx context.Context, _, _ string, _ []byte, _ Credentials) error {
+	close(r.entered)
+	<-r.gate
+	r.ctxs <- ctx.Err()
+	return ctx.Err()
+}
+
+func TestAFirstCallerThatGivesUpDoesNotFailTheOthers(t *testing.T) {
+	t.Parallel()
+	d, _ := NewDeriver(testKey(1), 1)
+	reg := &ctxRegistrar{entered: make(chan struct{}), gate: make(chan struct{}), ctxs: make(chan error, 1)}
+	s, _ := NewService(d, reg, "zati", time.Hour)
+	first, cancel := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := s.Issue(first, "inst-a")
+		firstErr <- err
+	}()
+	<-reg.entered // the first caller started the registration
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, err := s.Issue(context.Background(), "inst-a")
+		waiterErr <- err
+	}()
+	cancel()
+	close(reg.gate)
+	if err := <-reg.ctxs; err != nil {
+		t.Fatalf("the registration ran under the first caller's cancelled context: %v", err)
+	}
+	if err := <-firstErr; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: %v", err)
+	}
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("waiter: %v", err)
+	}
+}
