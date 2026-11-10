@@ -3,9 +3,11 @@ package bootcred
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sufuree/sufuree/internal/bootscope"
 	"github.com/sufuree/sufuree/internal/resource"
@@ -88,8 +90,40 @@ func TestGuardedRefusesForeignInstallation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected refusal")
 	}
+	if !errors.Is(err, ErrAuthorizeDenied) {
+		t.Fatalf("err = %v, want ErrAuthorizeDenied", err)
+	}
 	if len(fake.in) != 0 {
 		t.Fatalf("STS called despite refusal: %d", len(fake.in))
+	}
+}
+
+func TestGuardedDenyDoesNotUseStaleCache(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/hosts/h1/credentials/inst-1", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, bootscope.ErrNotHeld.Error(), http.StatusForbidden)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fake := &fakeSTS{}
+	g := &Guarded{
+		Inner:  &STS{NewClient: func(string) (AssumeRoler, error) { return fake, nil }},
+		Client: &AssignmentClient{BaseURL: srv.URL, HostUID: "h1", HTTP: srv.Client()},
+	}
+	// Poison the cache with an assignment the controller has since revoked.
+	g.assignments = []bootscope.Assignment{{
+		Placement: resource.Placement{
+			UID: "p1", HostUID: "h1", Replica: "inst-1", Phase: resource.PhaseReady,
+		},
+		SessionTags: map[string]string{"replica": "inst/inst-1"},
+	}}
+	g.fetchedAt = time.Now()
+	_, err := g.Issue(context.Background(), spec(), 1)
+	if !errors.Is(err, ErrAuthorizeDenied) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(fake.in) != 0 {
+		t.Fatalf("STS called after deny: %d", len(fake.in))
 	}
 }
 

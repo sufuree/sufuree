@@ -16,6 +16,10 @@ import (
 	"github.com/sufuree/sufuree/internal/workload"
 )
 
+// ErrAuthorizeDenied means the controller refused the installation or tags.
+// Guarded must not fall back to a cached assignment list after this error.
+var ErrAuthorizeDenied = errors.New("bootcred: authorize denied")
+
 // AssignmentClient pulls controller-published assignments and authorizes
 // session tags before the inner Issuer assumes a role.
 type AssignmentClient struct {
@@ -85,6 +89,9 @@ func (c *AssignmentClient) AuthorizeTags(ctx context.Context, installation strin
 	if err != nil {
 		return nil, err
 	}
+	if res.StatusCode == http.StatusForbidden || res.StatusCode == http.StatusBadRequest {
+		return nil, fmt.Errorf("%w: %s: %s", ErrAuthorizeDenied, res.Status, strings.TrimSpace(string(body)))
+	}
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("bootcred: authorize %s: %s", res.Status, strings.TrimSpace(string(body)))
 	}
@@ -142,8 +149,12 @@ func (g *Guarded) authorize(ctx context.Context, installation string, requested 
 	if err == nil {
 		return tags, nil
 	}
-	// If the broker is down, fall back to the last pulled assignment list
-	// (or a fresh pull) and authorize locally with the same bootscope rules.
+	// A controller deny is authoritative: never override with a stale cache.
+	if errors.Is(err, ErrAuthorizeDenied) {
+		return nil, err
+	}
+	// Broker unreachable / non-deny failure: fall back to assignments and
+	// apply the same bootscope pin rules locally.
 	as, fetchErr := g.cachedAssignments(ctx)
 	if fetchErr != nil {
 		return nil, errors.Join(err, fetchErr)
