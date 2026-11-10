@@ -32,6 +32,7 @@ import (
 	"github.com/sufuree/sufuree/internal/bootfloor"
 	"github.com/sufuree/sufuree/internal/guest"
 	"github.com/sufuree/sufuree/internal/journal"
+	"github.com/sufuree/sufuree/internal/replicacred"
 	"github.com/sufuree/sufuree/internal/wakehint"
 	"github.com/sufuree/sufuree/internal/workload"
 )
@@ -70,6 +71,10 @@ type Options struct {
 	// Credentials issues per-boot credentials for a workload with
 	// boot_credentials. A boot of such a workload fails without it.
 	Credentials bootcred.Issuer
+	// Replica issues the installation's own replica credentials for a
+	// workload with replica_credentials. A boot of such a workload fails
+	// without it.
+	Replica ReplicaIssuer
 	// HintKey is the workload's hint key (hint_key_env_key), passed to
 	// every boot. A boot of such a workload fails without it.
 	HintKey []byte
@@ -82,6 +87,12 @@ type Options struct {
 	// FloorRead is how often an awake workload's hint is read so its
 	// progress reaches the controller (default bootfloor.DefaultInterval).
 	FloorRead time.Duration
+}
+
+// ReplicaIssuer is the controller's replica credential service as a host
+// sees it (bootcred.AssignmentClient).
+type ReplicaIssuer interface {
+	ReplicaCredentials(ctx context.Context, installation string) (replicacred.Credentials, error)
 }
 
 // FloorAuthority is the controller's boot-floor service as a host sees it.
@@ -315,6 +326,11 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 			return nil, 0, err
 		}
 	}
+	if a.spec.ReplicaCredentials != nil {
+		if err := a.issueReplica(gen, env); err != nil {
+			return nil, 0, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), a.spec.StartupTimeout.Duration)
 	defer cancel()
 	t0 := time.Now()
@@ -458,6 +474,23 @@ func (a *Activator) issueCredentials(gen uint64, env map[string]string) error {
 		env[k] = v
 	}
 	a.log.Info("boot credentials issued", "generation", gen, "session", bootcred.SessionName(a.spec.ID, gen), "ms", time.Since(t0).Milliseconds())
+	return nil
+}
+
+// issueReplica adds the installation's replica credentials to env.
+func (a *Activator) issueReplica(gen uint64, env map[string]string) error {
+	if a.opt.Replica == nil {
+		return fmt.Errorf("workload %q has replica_credentials but the agent has no controller", a.spec.ID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), CredentialIssueTimeout)
+	defer cancel()
+	c, err := a.opt.Replica.ReplicaCredentials(ctx, a.spec.ID)
+	if err != nil {
+		return fmt.Errorf("replica credentials: %w", err)
+	}
+	env[a.spec.ReplicaCredentials.Env.AccessKeyID] = c.AccessKeyID
+	env[a.spec.ReplicaCredentials.Env.SecretAccessKey] = c.SecretAccessKey
+	a.log.Info("replica credentials issued", "generation", gen)
 	return nil
 }
 

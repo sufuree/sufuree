@@ -336,6 +336,10 @@ func WriteIssued(prefix string, is Issued) error {
 	return nil
 }
 
+// ReadPrivate reads a private key file as readPrivate does, for other
+// packages' secrets.
+func ReadPrivate(path string) ([]byte, error) { return readPrivate(path) }
+
 // readPrivate opens path once without following a symlink and checks the
 // opened file is regular and readable only by its owner.
 func readPrivate(path string) ([]byte, error) {

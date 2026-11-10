@@ -90,7 +90,7 @@ func newAuthFixture(t *testing.T) authFixture {
 	seedWorld(t, st)
 	j := &controlraft.Journal{Store: st}
 	c := reconcile.New(j, nil, nil, reconcile.Options{})
-	srv := httptest.NewUnstartedServer(controlHandlerAuth(nil, c, j, true))
+	srv := httptest.NewUnstartedServer(controlHandlerAuth(nil, c, j, true, nil))
 	if srv.TLS, err = controlauth.ServerTLS(srvPrefix+".crt", srvPrefix+".key", filepath.Join(ca, "ca.crt")); err != nil {
 		t.Fatal(err)
 	}

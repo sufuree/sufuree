@@ -162,6 +162,12 @@ func runHost(args []string) error {
 			log.Warn("some processes could not be checked for a leftover guest", "workload", w.ID, "unreadable", unreadable)
 		}
 		opt := activator.Options{Tick: *tick, HintPoll: *hintPoll, Logger: log, Credentials: issuer}
+		if w.ReplicaCredentials != nil {
+			if *controllerURL == "" {
+				return fmt.Errorf("workload %s: replica_credentials needs --controller and --host-id", w.ID)
+			}
+			opt.Replica = &bootcred.AssignmentClient{BaseURL: *controllerURL, HostUID: *hostUID, HTTP: controlClient}
+		}
 		if floor != nil {
 			opt.Floor = floor
 		}

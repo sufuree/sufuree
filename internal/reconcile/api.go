@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/sufuree/sufuree/internal/bootscope"
+	"github.com/sufuree/sufuree/internal/replicacred"
 	"github.com/sufuree/sufuree/internal/resource"
 	"github.com/sufuree/sufuree/internal/store"
 )
@@ -27,7 +29,17 @@ import (
 //
 // PUT rejects a stale ResourceVersion. If-Match, when present, must equal the
 // body's resource_version.
-func Handler(c *Controller) http.Handler {
+func Handler(c *Controller) http.Handler { return HandlerWith(c, nil) }
+
+// ReplicaIssuer issues an installation's replica credentials
+// (replicacred.Service).
+type ReplicaIssuer interface {
+	Issue(ctx context.Context, installation string) (replicacred.Credentials, error)
+}
+
+// HandlerWith is Handler. With replica set, the credentials route also
+// returns the installation's own replica credentials.
+func HandlerWith(c *Controller, replica ReplicaIssuer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /v1/resources/{kind}/{name}", func(w http.ResponseWriter, r *http.Request) {
 		putResource(c, w, r)
@@ -72,7 +84,7 @@ func Handler(c *Controller) http.Handler {
 		writeJSON(w, http.StatusOK, bootscope.AssignmentsForHost(got, id))
 	})
 	mux.HandleFunc("POST /v1/hosts/{id}/credentials/{installation}", func(w http.ResponseWriter, r *http.Request) {
-		postCredentials(c, w, r)
+		postCredentials(c, replica, w, r)
 	})
 	mux.HandleFunc("GET /v1/operations", func(w http.ResponseWriter, r *http.Request) {
 		got, err := c.ListOperations(r.Context())
@@ -103,9 +115,12 @@ type credentialRequest struct {
 type credentialResponse struct {
 	Installation string            `json:"installation"`
 	SessionTags  map[string]string `json:"session_tags"`
+	// Replica is the installation's own replica credentials, when the
+	// controller issues them (--replica-credentials).
+	Replica *replicacred.Credentials `json:"replica,omitempty"`
 }
 
-func postCredentials(c *Controller, w http.ResponseWriter, r *http.Request) {
+func postCredentials(c *Controller, replica ReplicaIssuer, w http.ResponseWriter, r *http.Request) {
 	hostID := r.PathValue("id")
 	installation := r.PathValue("installation")
 	if hostID == "" || installation == "" {
@@ -141,7 +156,18 @@ func postCredentials(c *Controller, w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, credentialResponse{Installation: installation, SessionTags: tags})
+	out := credentialResponse{Installation: installation, SessionTags: tags}
+	if replica != nil {
+		// Only after Authorize: the host holds this installation.
+		creds, err := replica.Issue(r.Context(), installation)
+		if err != nil {
+			http.Error(w, "replica credentials: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		out.Replica = &creds
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, out)
 }
 
 func putResource(c *Controller, w http.ResponseWriter, r *http.Request) {

@@ -135,3 +135,40 @@ func awsString(p *string) string {
 }
 
 var _ Issuer = (*Guarded)(nil)
+
+func TestReplicaCredentialsClient(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		ok     bool
+		denied bool
+	}{
+		{"issued", 200, `{"installation":"inst-1","session_tags":{"replica":"inst/inst-1"},"replica":{"access_key_id":"SFRA","secret_access_key":"s"}}`, true, false},
+		{"controller without replica credentials", 200, `{"installation":"inst-1","session_tags":{"replica":"inst/inst-1"}}`, false, false},
+		{"empty secret", 200, `{"replica":{"access_key_id":"SFRA","secret_access_key":""}}`, false, false},
+		{"not held", 403, `bootscope: host does not hold this installation`, false, true},
+		{"unavailable", 503, `replica credentials: filer down`, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/hosts/h1/credentials/inst-1" {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := &AssignmentClient{BaseURL: srv.URL, HostUID: "h1", HTTP: srv.Client()}
+			got, err := c.ReplicaCredentials(context.Background(), "inst-1")
+			if tc.ok != (err == nil) || (tc.ok && (got.AccessKeyID != "SFRA" || got.SecretAccessKey != "s")) {
+				t.Fatalf("got %+v, %v", got, err)
+			}
+			if errors.Is(err, ErrAuthorizeDenied) != tc.denied {
+				t.Fatalf("denied = %v, want %v (%v)", errors.Is(err, ErrAuthorizeDenied), tc.denied, err)
+			}
+		})
+	}
+}

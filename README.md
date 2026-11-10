@@ -276,3 +276,81 @@ A), so both survive the loss of any host. Production PHI workloads need this.
 Stopping is crash-consistent: workloads must acknowledge only writes that are
 already durable off-host. QEMU user networking is a slice simplification, not
 the production isolation boundary.
+
+### Replica credentials per installation
+
+With `sufuree controller --replica-credentials replica.json` and a workload
+with `replica_credentials`, each guest gets object-store credentials that
+reach only its own installation's prefix, `<bucket>/inst/<id>/*`, rather than
+one credential shared by every guest. Production PHI workloads need this: with
+a shared credential, one compromised guest could read every installation's
+replica.
+
+```json
+"replica_credentials": {"env": {"access_key_id": "ZATI_REPLICA_ACCESS_KEY", "secret_access_key": "ZATI_REPLICA_SECRET_KEY"}}
+```
+
+- **Derivation.** The controller derives each installation's access key and
+  secret from one provisioning key with HMAC-SHA256, the key version and the
+  installation ID, so its Raft state holds no secrets. Create the key with
+  `sufuree replica-key init --out FILE --kms-key-id alias/sufuree-replica-credentials`;
+  it exists on disk only wrapped by that KMS key (encryption context
+  `purpose=sufuree-replica-credentials`), and the controller unwraps it at
+  start. A plaintext key is accepted only with `"development": true`.
+- **Registration.** Before returning an installation's credentials the first
+  time (and every 10 minutes after), the controller writes its SeaweedFS
+  identity, `/etc/iam/identities/sufuree-<id>.json`, through the filer's HTTP
+  API with a signed request. It then lists the installation's prefix with the
+  new credentials until the S3 servers accept them. If they don't within 10
+  seconds, it removes the identity file and the boot fails: one unreadable
+  identity file stops the S3 servers reloading any identity.
+- **Delivery.** A host gets the credentials at every boot from
+  `POST /v1/hosts/{id}/credentials/{installation}`, which serves only an
+  installation the host holds, over mutual TLS (the controller refuses
+  `--replica-credentials` without TLS flags). A boot fails rather than start
+  without them. The host agent needs `--controller` and `--host-id`.
+- **Rotation.** Raise `key_version`. Each installation's identity is
+  replaced, and its old key revoked, at its next boot, when its previous
+  guest has stopped.
+
+`replica.json`:
+
+```json
+{"key_file": "/etc/sufuree/replica-key.json", "key_version": 1, "bucket": "zati",
+ "filer": {"url": "https://filer:8888", "ca_file": "/etc/sufuree/filer-ca.pem",
+           "write_jwt_key_file": "/etc/sufuree/filer-write.jwt", "read_jwt_key_file": "/etc/sufuree/filer-read.jwt"},
+ "s3": {"url": "https://s3:8333", "ca_file": "/etc/sufuree/s3-ca.pem", "region": "us-east-1"}}
+```
+
+The SeaweedFS deployment must:
+
+- keep small files inline in filer metadata, `-filer.saveToFilerLimit=65536`
+  (or at least 4096). The S3 servers' credential manager reads only inline
+  content and sees a chunked identity file as empty;
+- sign filer reads and writes (`jwt.filer_signing.key` and
+  `jwt.filer_signing.read.key` in `security.toml`). Identity files hold
+  secrets in plaintext;
+- not expose the filer's HTTP or gRPC ports to guests. A QEMU user-network
+  guest reaches every port on the host's loopback through `10.0.2.2`, so run
+  the filer on another host or behind a firewall rule, not on the guest
+  host's loopback;
+- keep no static `-s3.config` identities other than administrators, and start
+  without AWS credentials in the environment: SeaweedFS 4.48 turns
+  `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` into an administrator
+  identity.
+
+Verified against SeaweedFS 4.48 (`TestSeaweedFS`): each installation's
+credentials read, write, conditionally create and list only its own prefix,
+and are refused on another installation's prefix, a neighboring prefix such
+as `inst/<id>x/`, and a bucket-wide list. Raising the version revokes the old
+key, and an unsigned read of an identity file is refused.
+
+Limits:
+- **A host keeps credentials it was given.** An installation that moves
+  keeps its credentials until the version is raised, so the previous host
+  still holds a working key. Raise the version after removing a host that
+  may be compromised.
+- **Deleted installations keep their identities.** Removing an identity when
+  its installation is deleted is not implemented yet.
+- **Wake hints use the host's credentials.** The host reads every hint with
+  `wake_hints`'s credentials, which reach every installation's prefix.

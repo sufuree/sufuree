@@ -67,6 +67,7 @@ func runController(args []string) error {
 	tlsCert := fs.String("tls-cert", "", "control API server certificate (from `sufuree ca issue --role controller`)")
 	tlsKey := fs.String("tls-key", "", "control API server key")
 	tlsClientCA := fs.String("tls-client-ca", "", "controller CA certificate; every caller must present a certificate it issued")
+	replicaCfg := fs.String("replica-credentials", "", "JSON config: issue each installation its own replica credentials, limited to its prefix (package replicacred)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -82,6 +83,21 @@ func runController(args []string) error {
 	}
 	if raftOn && (*raftBind == "" || *raftID == "") {
 		return errors.New("--raft-bind and --raft-id are required to enable raft")
+	}
+	// Loaded before Raft opens, so a bad config or an unreachable KMS
+	// leaves no partial cluster.
+	var replica reconcile.ReplicaIssuer
+	if *replicaCfg != "" {
+		if !authOn {
+			// Without caller authentication anyone could claim a host and
+			// take its installations' credentials.
+			return errors.New("--replica-credentials needs --tls-cert, --tls-key and --tls-client-ca")
+		}
+		svc, err := loadReplicaService(context.Background(), *replicaCfg)
+		if err != nil {
+			return err
+		}
+		replica = svc
 	}
 	mem := &executor.Memory{}
 	switch *execName {
@@ -171,7 +187,7 @@ func runController(args []string) error {
 	if node != nil {
 		leader = node
 	}
-	srv := &http.Server{Handler: controlHandlerAuth(leader, c, floorJournal(*bootFloor, journal), authOn)}
+	srv := &http.Server{Handler: controlHandlerAuth(leader, c, floorJournal(*bootFloor, journal), authOn, replica)}
 	if authOn {
 		if srv.TLSConfig, err = controlauth.ServerTLS(*tlsCert, *tlsKey, *tlsClientCA); err != nil {
 			return err
@@ -273,14 +289,16 @@ func floorJournal(on bool, j *controlraft.Journal) bootfloor.Committer {
 // controlHandlerWith is the control API, plus the boot-floor routes when
 // floors is set.
 func controlHandlerWith(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer) http.Handler {
-	return controlHandlerAuth(leader, c, floors, false)
+	return controlHandlerAuth(leader, c, floors, false, nil)
 }
 
 // controlHandlerAuth is the control API. With auth, every request needs a
 // verified client certificate whose principal the route policy admits
 // (controlauth), and floor lowering takes two authenticated principals.
-func controlHandlerAuth(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer, auth bool) http.Handler {
-	next := reconcile.Handler(c)
+// With replica set, hosts also get their installations' replica
+// credentials.
+func controlHandlerAuth(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer, auth bool, replica reconcile.ReplicaIssuer) http.Handler {
+	next := reconcile.HandlerWith(c, replica)
 	if floors != nil {
 		mux := http.NewServeMux()
 		var identify bootfloor.Identify
