@@ -458,14 +458,14 @@ func (c *Controller) place(ctx context.Context, w world, d placement.Decision) e
 	if err != nil {
 		return err
 	}
-	rep, err := entropy()
+	replica, err := replicaID(w, d.ResourceUID)
 	if err != nil {
 		return err
 	}
 	stamp := c.stamp(w.now)
 	p := resource.Placement{
 		UID: "p" + id, ResourceUID: d.ResourceUID, HostUID: d.HostID,
-		Replica: "r" + rep, Generation: gen, OwnerEpoch: w.meta.OwnerEpoch,
+		Replica: replica, Generation: gen, OwnerEpoch: w.meta.OwnerEpoch,
 		MemoryMiB: d.MemoryMiB, Phase: resource.PhaseReady, UpdatedAt: stamp,
 	}
 	if err := c.db.Update(func(tx *store.Tx) error { return tx.PutPlacement(p) }); err != nil {
@@ -700,6 +700,27 @@ func (c *Controller) stamp(after time.Time) time.Time {
 	}
 	c.last = t
 	return t
+}
+
+// replicaID names a new placement's replica. An app with at most one
+// replica is one installation, so its replica is its resource UID: the same
+// on every host it moves to, which keeps its storage prefix, hint key, boot
+// generation and rollback floor (package bootfloor) with it. Only an app
+// that may run several replicas at once gets a fresh replica ID.
+func replicaID(w world, resourceUID string) (string, error) {
+	for _, app := range w.apps {
+		if app.UID != resourceUID {
+			continue
+		}
+		if spec, ok := app.Spec.(resource.AppSpec); ok && spec.MaxReplicas <= 1 {
+			return resourceUID, nil
+		}
+	}
+	rep, err := entropy()
+	if err != nil {
+		return "", err
+	}
+	return "r" + rep, nil
 }
 
 func entropy() (string, error) {

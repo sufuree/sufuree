@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sufuree/sufuree/internal/bootfloor"
 	"github.com/sufuree/sufuree/internal/controlraft"
 	"github.com/sufuree/sufuree/internal/demand"
 	"github.com/sufuree/sufuree/internal/edge"
@@ -61,6 +62,7 @@ func runController(args []string) error {
 	raftBootstrap := fs.Bool("raft-bootstrap", false, "create the initial one-voter raft configuration; refuse if raft state already exists")
 	edgeListen := fs.String("edge-listen", "", "optional public HTTP edge listen address")
 	edgeMax := fs.Int("edge-max-concurrent", 256, "edge concurrent request cap; 0 disables the cap")
+	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts (host identity is not authenticated yet: not for PHI)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -148,7 +150,10 @@ func runController(args []string) error {
 	if node != nil {
 		leader = node
 	}
-	srv := &http.Server{Handler: controlHandler(leader, c)}
+	srv := &http.Server{Handler: controlHandlerWith(leader, c, floorJournal(*bootFloor, journal))}
+	if *bootFloor {
+		log.Warn("boot floors enabled; host identity on the control API is not authenticated yet, so this is not for PHI")
+	}
 	var edgeSrv *http.Server
 	var edgeLn net.Listener
 	if *edgeListen != "" {
@@ -225,7 +230,26 @@ type leaderView interface {
 }
 
 func controlHandler(leader leaderView, c *reconcile.Controller) http.Handler {
+	return controlHandlerWith(leader, c, nil)
+}
+
+func floorJournal(on bool, j *controlraft.Journal) bootfloor.Committer {
+	if !on {
+		return nil
+	}
+	return j
+}
+
+// controlHandlerWith is the control API, plus the boot-floor routes when
+// floors is set.
+func controlHandlerWith(leader leaderView, c *reconcile.Controller, floors bootfloor.Committer) http.Handler {
 	next := reconcile.Handler(c)
+	if floors != nil {
+		mux := http.NewServeMux()
+		bootfloor.Register(mux, floors, nil)
+		mux.Handle("/", next)
+		next = mux
+	}
 	if leader == nil {
 		return next
 	}

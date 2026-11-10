@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,5 +65,43 @@ func TestProgressOnlyAdvancesAndIsDurable(t *testing.T) {
 	}
 	if got, _ := r.Get("w"); got.ProgressEpoch != 3 || got.ProgressSeq != 1 || got.Version != 2 {
 		t.Fatalf("after NextGeneration: %+v", got)
+	}
+}
+
+func TestAdoptControllerGrants(t *testing.T) {
+	j, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.NextGeneration("w"); err != nil { // standalone history: H=1
+		t.Fatal(err)
+	}
+	if _, _, err := j.AdvanceProgress("w", 1, 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Adopt("w", Grant{Generation: 1, Incarnation: 1}); !errors.Is(err, ErrNotAbove) {
+		t.Fatalf("a grant not above the host's record: %v", err)
+	}
+	r, err := j.Adopt("w", Grant{Generation: 2, Incarnation: 1, Epoch: 1, Seq: 3})
+	if err != nil || r.Generation != 2 || r.Incarnation != 1 || r.ProgressSeq != 5 || r.Version != 3 {
+		t.Fatalf("same incarnation keeps the higher floor: %+v, %v", r, err)
+	}
+	r, err = j.Adopt("w", Grant{Generation: 3, Incarnation: 2, IncarnationFrom: 3, Epoch: 1, Seq: 1})
+	if err != nil || r.Incarnation != 2 || r.IncarnationFrom != 3 || r.ProgressSeq != 1 {
+		t.Fatalf("a newer incarnation replaces the floor: %+v, %v", r, err)
+	}
+	if _, err := j.Adopt("w", Grant{Generation: 4, Incarnation: 1}); !errors.Is(err, ErrNewerLocalIncarnation) {
+		t.Fatalf("an older incarnation: %v", err)
+	}
+	j2, _ := Open(j.dir) // durable across restarts
+	if r, err := j2.Get("w"); err != nil || r.Generation != 3 || r.Incarnation != 2 {
+		t.Fatalf("after restart: %+v, %v", r, err)
+	}
+	// Progress keeps the version 3 record at version 3.
+	if _, _, err := j2.AdvanceProgress("w", 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := j2.Get("w"); r.Version != 3 || r.Incarnation != 2 {
+		t.Fatalf("AdvanceProgress downgraded the record: %+v", r)
 	}
 }
