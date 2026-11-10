@@ -25,6 +25,10 @@ import (
 // OpRestoreStore replaces the control record file with a store Export archive.
 const OpRestoreStore = "restore_store"
 
+// archiveMaxBytes matches store.Import's bound so staging fails before a
+// propose that the FSM would reject.
+const archiveMaxBytes = 32 << 20
+
 // Encode builds a CommandFSM log entry.
 func Encode(op string, payload any) ([]byte, error) {
 	if op == "" {
@@ -98,6 +102,20 @@ func (j *Journal) Update(fn func(*store.Tx) error) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	timeout := j.ApplyTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx := context.Background()
+	// Wait for prior log entries before Export so a new leader does not stage
+	// from a store that is behind the committed log.
+	if err := j.Node.Barrier(ctx, timeout); err != nil {
+		return err
+	}
+	term, err := j.Node.Term()
+	if err != nil {
+		return err
+	}
 	archive, err := j.stage(fn)
 	if err != nil {
 		return err
@@ -106,11 +124,11 @@ func (j *Journal) Update(fn func(*store.Tx) error) error {
 	if err != nil {
 		return err
 	}
-	timeout := j.ApplyTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
+	cur, err := j.Node.Term()
+	if err != nil || cur != term || !j.Node.IsLeader() {
+		return raftnode.ErrNotLeader
 	}
-	return j.Node.Apply(context.Background(), cmd, timeout)
+	return j.Node.Apply(ctx, cmd, timeout)
 }
 
 // stage exports the live store, mutates a temporary copy, and returns the
@@ -140,6 +158,9 @@ func (j *Journal) stage(fn func(*store.Tx) error) ([]byte, error) {
 	var out bytes.Buffer
 	if err := staging.Export(&out); err != nil {
 		return nil, err
+	}
+	if out.Len() > archiveMaxBytes {
+		return nil, fmt.Errorf("controlraft: staged archive is %d bytes; store Import limit is %d", out.Len(), archiveMaxBytes)
 	}
 	return out.Bytes(), nil
 }
