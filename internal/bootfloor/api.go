@@ -102,7 +102,7 @@ func RegisterWithIdentity(mux *http.ServeMux, j Committer, now func() time.Time,
 			writeErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, f)
+		writeJSON(w, http.StatusOK, viewOf(f))
 	})
 	if identify == nil {
 		mux.HandleFunc("POST /v1/installations/{installation}/floor/lower", func(w http.ResponseWriter, r *http.Request) {
@@ -141,8 +141,7 @@ func RegisterWithIdentity(mux *http.ServeMux, j Committer, now func() time.Time,
 			http.Error(w, "lower approval: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		l := Lowering{ExpectIncarnation: req.ExpectIncarnation, TargetIncarnation: req.TargetIncarnation,
-			Epoch: req.Epoch, Seq: req.Seq, Reference: req.Reference, ApprovedBy: who, At: now().UTC()}
+		l := Lowering{PendingDigest: req.PendingDigest, ApprovedBy: who, At: now().UTC()}
 		commitLowering(j, w, r.PathValue("installation"), KindApproveLower, l, PlanApproveLower)
 	})
 }
@@ -160,13 +159,24 @@ type LowerRequestBody struct {
 	Reference         string `json:"reference"`
 }
 
-// ApproveBody repeats the request being approved.
+// ApproveBody names the exact pending request being approved: its digest,
+// as GET .../floor returns it in pending_digest.
 type ApproveBody struct {
-	ExpectIncarnation uint64 `json:"expect_incarnation"`
-	TargetIncarnation uint64 `json:"target_incarnation,omitempty"`
-	Epoch             uint64 `json:"epoch"`
-	Seq               uint64 `json:"seq"`
-	Reference         string `json:"reference"`
+	PendingDigest string `json:"pending_digest"`
+}
+
+// FloorView is the floor record with the pending request's digest.
+type FloorView struct {
+	Floor         resource.BootFloor `json:"floor"`
+	PendingDigest string             `json:"pending_digest,omitempty"`
+}
+
+func viewOf(f resource.BootFloor) FloorView {
+	v := FloorView{Floor: f}
+	if f.Pending != nil {
+		v.PendingDigest = PendingDigest(*f.Pending)
+	}
+	return v
 }
 
 func commitLowering(j Committer, w http.ResponseWriter, inst, kind string, l Lowering,
@@ -193,7 +203,7 @@ func commitLowering(j Committer, w http.ResponseWriter, inst, kind string, l Low
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, viewOf(out))
 }
 
 func readBody(r *http.Request, limit int64, v any) error {
@@ -355,7 +365,7 @@ func postLower(j Committer, now func() time.Time, w http.ResponseWriter, r *http
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, viewOf(out))
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

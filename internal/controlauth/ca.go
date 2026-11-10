@@ -30,6 +30,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/big"
 	"net"
@@ -37,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 )
 
@@ -154,10 +156,14 @@ func InitCA(dir string, validFor time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if err := writeExclusive(filepath.Join(dir, caKeyFile), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+	// The certificate first (replacing a stale one from a failed init), the
+	// key last: a CA exists only once its key does.
+	certPath := filepath.Join(dir, caCertFile)
+	_ = os.Remove(certPath)
+	if err := writeExclusive(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return err
 	}
-	return writeExclusive(filepath.Join(dir, caCertFile), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
+	return writeExclusive(filepath.Join(dir, caKeyFile), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600)
 }
 
 // LoadCA reads a CA directory. The key must be readable only by its owner.
@@ -167,14 +173,7 @@ func LoadCA(dir string) (*CA, error) {
 		return nil, err
 	}
 	keyPath := filepath.Join(dir, caKeyFile)
-	st, err := os.Lstat(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("controlauth: %s must be a regular file readable only by its owner", keyPath)
-	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyPEM, err := readPrivate(keyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +265,29 @@ func WriteIssued(prefix string, is Issued) error {
 	if err := writeExclusive(prefix+".key", is.KeyPEM, 0o600); err != nil {
 		return err
 	}
-	return writeExclusive(prefix+".crt", is.CertPEM, 0o644)
+	if err := writeExclusive(prefix+".crt", is.CertPEM, 0o644); err != nil {
+		_ = os.Remove(prefix + ".key") // no orphan key without its certificate
+		return err
+	}
+	return nil
+}
+
+// readPrivate opens path once without following a symlink and checks the
+// opened file is regular and readable only by its owner.
+func readPrivate(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("controlauth: %s must be a regular file readable only by its owner", path)
+	}
+	return io.ReadAll(io.LimitReader(f, 1<<16))
 }
 
 func parseCert(b []byte) (*x509.Certificate, error) {

@@ -97,7 +97,9 @@ func Middleware(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
-		if p.Role == RoleController || !Allowed(p, r.Method, r.URL.Path) {
+		// Percent-encoded paths are refused: the policy and the router
+		// must see the same segments.
+		if r.URL.RawPath != "" || p.Role == RoleController || !Allowed(p, r.Method, r.URL.Path) {
 			http.Error(w, fmt.Sprintf("%s may not %s %s", p, r.Method, r.URL.Path), http.StatusForbidden)
 			return
 		}
@@ -156,7 +158,15 @@ func (f TLSFlags) Client(baseURL string) (*http.Client, error) {
 	if f.Cert == "" || f.Key == "" || f.CA == "" {
 		return nil, errors.New("an https:// controller needs --tls-cert, --tls-key and --tls-ca")
 	}
-	cert, err := tls.LoadX509KeyPair(f.Cert, f.Key)
+	keyPEM, err := readPrivate(f.Key)
+	if err != nil {
+		return nil, err
+	}
+	certPEM, err := os.ReadFile(f.Cert)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return nil, err
 	}

@@ -33,6 +33,8 @@ package bootfloor
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +109,8 @@ type Lowering struct {
 	Reference         string `json:"reference"`
 	// At is set by the controller when it accepts the request.
 	At time.Time `json:"at"`
+	// PendingDigest names the request an approval approves.
+	PendingDigest string `json:"pending_digest,omitempty"`
 }
 
 // Command is one boot_floor FSM command.
@@ -275,20 +279,31 @@ func PlanRequestLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, e
 }
 
 // ErrNoMatchingRequest means an approval does not match the pending
-// request (or there is none).
+// request (or there is none, or it has expired).
 var ErrNoMatchingRequest = errors.New("bootfloor: no pending lowering matches this approval")
+
+// PendingTTL is how long a lowering request may wait for approval.
+const PendingTTL = 24 * time.Hour
+
+// PendingDigest identifies one pending request exactly: who asked, for
+// whom, why, and what. An approval names it, so a later request that
+// replaces the pending one (even with the same mark) is not approved by an
+// approval meant for the first.
+func PendingDigest(p resource.PendingLowering) string {
+	b, _ := json.Marshal(p)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // PlanApproveLower applies the pending lowering that l repeats, approved by
 // l.ApprovedBy, who must not be its requester.
 func PlanApproveLower(rec resource.BootFloor, l Lowering) (resource.BootFloor, error) {
 	p := rec.Pending
-	target := l.TargetIncarnation
-	if target == 0 && p != nil {
-		target = p.TargetIncarnation
-	}
-	if p == nil || p.ExpectIncarnation != l.ExpectIncarnation || p.TargetIncarnation != target ||
-		p.Epoch != l.Epoch || p.Seq != l.Seq || p.Reference != l.Reference {
+	if p == nil || l.PendingDigest == "" || PendingDigest(*p) != l.PendingDigest {
 		return resource.BootFloor{}, ErrNoMatchingRequest
+	}
+	if l.At.Sub(p.At) > PendingTTL {
+		return resource.BootFloor{}, fmt.Errorf("%w: the request expired", ErrNoMatchingRequest)
 	}
 	return PlanLower(rec, Lowering{
 		ExpectIncarnation: p.ExpectIncarnation, TargetIncarnation: p.TargetIncarnation,

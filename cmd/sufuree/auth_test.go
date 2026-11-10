@@ -185,31 +185,66 @@ func TestFloorLoweringNeedsTwoPrincipals(t *testing.T) {
 	if code, _ := call(t, op, "POST", base+"/lower-request", req); code != http.StatusForbidden {
 		t.Fatalf("an operator requested a lowering: %d", code)
 	}
+	pending := func() string {
+		t.Helper()
+		code, body := call(t, op, "GET", base, nil)
+		var v struct {
+			PendingDigest string `json:"pending_digest"`
+		}
+		if code != http.StatusOK || json.Unmarshal([]byte(body), &v) != nil {
+			t.Fatalf("floor read: %d %s", code, body)
+		}
+		return v.PendingDigest
+	}
 	if code, body := call(t, zati, "POST", base+"/lower-request", req); code != http.StatusOK {
 		t.Fatalf("product-client request: %d %s", code, body)
 	}
-	appr := bootfloor.ApproveBody{ExpectIncarnation: 1, Epoch: 7, Seq: 1, Reference: "INC-9"}
+	first := pending()
+	if first == "" {
+		t.Fatal("no pending digest")
+	}
+	appr := bootfloor.ApproveBody{PendingDigest: first}
 	if code, _ := call(t, zati, "POST", base+"/lower-approve", appr); code != http.StatusForbidden {
 		t.Fatalf("the requester approved its own lowering: %d", code)
 	}
-	wrong := appr
-	wrong.Seq = 0
-	if code, _ := call(t, op, "POST", base+"/lower-approve", wrong); code != http.StatusConflict {
-		t.Fatalf("an approval naming a different mark: %d", code)
+	// Another request replaces the pending one with the same mark but a
+	// different owner: the approval meant for the first no longer matches.
+	swapped := req
+	swapped.Owner = "someone-else"
+	if code, body := call(t, zati, "POST", base+"/lower-request", swapped); code != http.StatusOK {
+		t.Fatalf("second request: %d %s", code, body)
 	}
+	if code, _ := call(t, op, "POST", base+"/lower-approve", appr); code != http.StatusConflict {
+		t.Fatalf("an approval matched a swapped request: %d", code)
+	}
+	if code, body := call(t, zati, "POST", base+"/lower-request", req); code != http.StatusOK {
+		t.Fatalf("re-request: %d %s", code, body)
+	}
+	appr = bootfloor.ApproveBody{PendingDigest: pending()}
 	code, body := call(t, op, "POST", base+"/lower-approve", appr)
 	if code != http.StatusOK {
 		t.Fatalf("approval: %d %s", code, body)
 	}
-	var rec resource.BootFloor
-	if err := json.Unmarshal([]byte(body), &rec); err != nil {
+	var view struct {
+		Floor resource.BootFloor `json:"floor"`
+	}
+	if err := json.Unmarshal([]byte(body), &view); err != nil {
 		t.Fatal(err)
 	}
+	rec := view.Floor
 	if rec.Incarnation != 2 || rec.ProgressEpoch != 7 || rec.ProgressSeq != 1 || rec.Pending != nil || rec.Lowered == nil ||
 		rec.Lowered.RequestedBy != "product-client:zati for owner owner-42" || rec.Lowered.ApprovedBy != "operator:alice" {
 		t.Fatalf("lowered record = %+v (audit %+v)", rec, rec.Lowered)
 	}
 	if code, _ := call(t, op, "POST", base+"/lower-approve", appr); code != http.StatusConflict {
 		t.Fatalf("an approval was replayed: %d", code)
+	}
+}
+
+func TestEncodedPathsAreRefused(t *testing.T) {
+	f := newAuthFixture(t)
+	hostA := f.client(t, "host", "host-a")
+	if code, _ := call(t, hostA, "GET", f.url+"/v1/hosts/host-a%2Fx/assignments", nil); code != http.StatusForbidden {
+		t.Fatalf("an encoded path got %d", code)
 	}
 }

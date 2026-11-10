@@ -134,3 +134,24 @@ func TestMergeEntryKeepsTheNewest(t *testing.T) {
 		t.Fatalf("older incarnation = %+v", got)
 	}
 }
+
+func TestApprovalBindsTheExactRequestAndExpires(t *testing.T) {
+	at := time.Unix(1000, 0).UTC()
+	r := *rec(20, 1, 19, 8)
+	req := Lowering{ExpectIncarnation: 1, Epoch: 6, Seq: 2, RequestedBy: "product-client:zati for owner o", Reason: "r", Reference: "INC-1", At: at}
+	pend, err := PlanRequestLower(r, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := PendingDigest(*pend.Pending)
+	if _, err := PlanApproveLower(pend, Lowering{PendingDigest: "x", ApprovedBy: "operator:a", At: at}); !errors.Is(err, ErrNoMatchingRequest) {
+		t.Fatalf("a wrong digest: %v", err)
+	}
+	if _, err := PlanApproveLower(pend, Lowering{PendingDigest: d, ApprovedBy: "operator:a", At: at.Add(PendingTTL + time.Second)}); !errors.Is(err, ErrNoMatchingRequest) {
+		t.Fatalf("an expired request: %v", err)
+	}
+	out, err := PlanApproveLower(pend, Lowering{PendingDigest: d, ApprovedBy: "operator:a", At: at.Add(time.Hour)})
+	if err != nil || out.Incarnation != 2 || out.Pending != nil || out.Lowered.RequestedBy != req.RequestedBy {
+		t.Fatalf("approval = %+v, %v", out, err)
+	}
+}
