@@ -87,7 +87,7 @@ func (c *AssignmentClient) ReplicaCredentials(ctx context.Context, installation 
 	var out struct {
 		Replica *replicacred.Credentials `json:"replica"`
 	}
-	if err := c.postCredentials(ctx, installation, map[string]any{}, &out); err != nil {
+	if err := c.postCredentials(ctx, installation, map[string]any{"replica": true}, &out); err != nil {
 		return replicacred.Credentials{}, err
 	}
 	if out.Replica == nil || out.Replica.AccessKeyID == "" || out.Replica.SecretAccessKey == "" {

@@ -53,8 +53,12 @@ func seedPlacement(t *testing.T, c *Controller, st *store.Store, host, replica s
 }
 
 func postCreds(t *testing.T, url string) (*http.Response, credentialResponse) {
+	return postCredsBody(t, url, `{"replica":true}`)
+}
+
+func postCredsBody(t *testing.T, url, body string) (*http.Response, credentialResponse) {
 	t.Helper()
-	res, err := http.Post(url, "application/json", bytes.NewBufferString(`{}`))
+	res, err := http.Post(url, "application/json", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,14 +102,31 @@ func TestCredentialsRouteIssuesReplicaCredentialsOnlyForHeldInstallations(t *tes
 	}
 }
 
-func TestCredentialsRouteWithoutReplicaIssuerOmitsReplica(t *testing.T) {
+func TestCredentialsRouteIssuesReplicaCredentialsOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+	c, st := newController(t, &executor.Memory{}, time.Now, 0)
+	seedPlacement(t, c, st, "h1", "inst-1", resource.PhaseReady)
+	rep := &fakeReplica{}
+	srv := httptest.NewServer(HandlerWith(c, rep))
+	t.Cleanup(srv.Close)
+	// An STS boot credential request gets its tags and nothing else, and
+	// creates no identity.
+	res, out := postCredsBody(t, srv.URL+"/v1/hosts/h1/credentials/inst-1", `{"requested_tags":{}}`)
+	if res.StatusCode != http.StatusOK || out.Replica != nil || len(out.SessionTags) == 0 || len(rep.issued) != 0 {
+		t.Fatalf("%s %+v, issued %v", res.Status, out, rep.issued)
+	}
+}
+
+func TestCredentialsRouteWithoutReplicaIssuerRefusesReplica(t *testing.T) {
 	t.Parallel()
 	c, st := newController(t, &executor.Memory{}, time.Now, 0)
 	seedPlacement(t, c, st, "h1", "inst-1", resource.PhaseReady)
 	srv := httptest.NewServer(Handler(c))
 	t.Cleanup(srv.Close)
-	res, out := postCreds(t, srv.URL+"/v1/hosts/h1/credentials/inst-1")
-	if res.StatusCode != http.StatusOK || out.Replica != nil {
-		t.Fatalf("%s %+v", res.Status, out)
+	if res, _ := postCreds(t, srv.URL+"/v1/hosts/h1/credentials/inst-1"); res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("%s, want 503", res.Status)
+	}
+	if res, out := postCredsBody(t, srv.URL+"/v1/hosts/h1/credentials/inst-1", `{}`); res.StatusCode != http.StatusOK || out.Replica != nil {
+		t.Fatalf("tags only: %s %+v", res.Status, out)
 	}
 }

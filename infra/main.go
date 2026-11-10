@@ -5,6 +5,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/kms"
@@ -111,7 +113,9 @@ func main() {
 		// controllerRoleArns: IAM roles of controllers that unwrap the
 		// replica provisioning key at start (optional).
 		var controllerArns []string
-		_ = cfg.TryObject("controllerRoleArns", &controllerArns)
+		if err := cfg.TryObject("controllerRoleArns", &controllerArns); err != nil && !errors.Is(err, config.ErrMissingVar) {
+			return fmt.Errorf("controllerRoleArns: %w", err)
+		}
 		id, err := aws.GetCallerIdentity(ctx, nil)
 		if err != nil {
 			return err

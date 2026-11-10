@@ -298,20 +298,29 @@ replica.
   `purpose=sufuree-replica-credentials`), and the controller unwraps it at
   start. A plaintext key is accepted only with `"development": true`.
 - **Registration.** Before returning an installation's credentials the first
-  time (and every 10 minutes after), the controller writes its SeaweedFS
-  identity, `/etc/iam/identities/sufuree-<id>.json`, through the filer's HTTP
-  API with a signed request. It then lists the installation's prefix with the
-  new credentials until the S3 servers accept them. If they don't within 10
-  seconds, it removes the identity file and the boot fails: one unreadable
-  identity file stops the S3 servers reloading any identity.
+  time, the controller reads its SeaweedFS identity,
+  `/etc/iam/identities/sufuree-<id>.json`, through the filer's HTTP API with a
+  signed request, and writes it only if it is missing or different. It then
+  lists the installation's prefix with the credentials until the S3 servers
+  accept them. If an identity this call wrote isn't accepted within 10
+  seconds, the controller removes it and the boot fails: one unreadable
+  identity file stops the S3 servers reloading any identity. An identity
+  that was already in place is never removed. After 10 minutes the next
+  request checks again, so an identity removed from the store comes back.
+  Concurrent requests for one installation share one registration, which
+  runs under its own 30-second limit rather than the first request's.
 - **Delivery.** A host gets the credentials at every boot from
-  `POST /v1/hosts/{id}/credentials/{installation}`, which serves only an
+  `POST /v1/hosts/{id}/credentials/{installation}` with `{"replica": true}`
+  (a request for STS session tags alone creates no identity), which serves only an
   installation the host holds, over mutual TLS (the controller refuses
   `--replica-credentials` without TLS flags). A boot fails rather than start
   without them. The host agent needs `--controller` and `--host-id`.
-- **Rotation.** Raise `key_version`. Each installation's identity is
-  replaced, and its old key revoked, at its next boot, when its previous
-  guest has stopped.
+- **Rotation.** Raise `key_version` on every controller at once: controllers
+  on different versions overwrite each other's identities as leadership
+  moves. Each installation's identity is replaced, and its old key revoked,
+  at its next boot, when its previous guest has stopped. If the new identity
+  isn't accepted, the installation has none until a later boot registers it
+  (the old key is revoked either way).
 
 `replica.json`:
 
@@ -340,9 +349,10 @@ The SeaweedFS deployment must:
   identity.
 
 Verified against SeaweedFS 4.48 (`TestSeaweedFS`): each installation's
-credentials read, write, conditionally create and list only its own prefix,
-and are refused on another installation's prefix, a neighboring prefix such
-as `inst/<id>x/`, and a bucket-wide list. Raising the version revokes the old
+credentials read, write, conditionally create and list only its own prefix.
+They are refused reading, writing or listing another installation's prefix,
+writing a neighboring prefix such as `inst/<id>x/`, listing the bucket, and
+reading through a `..` key. Raising the version revokes the old
 key, and an unsigned read of an identity file is refused.
 
 Limits:
@@ -352,5 +362,10 @@ Limits:
   may be compromised.
 - **Deleted installations keep their identities.** Removing an identity when
   its installation is deleted is not implemented yet.
+- **The operator can unwrap the provisioning key.** The KMS key policy lets
+  the operator encrypt and decrypt with it (to create the key and run a
+  development controller), so the operator alone can derive every
+  installation's credentials. Once controllers run under their own roles
+  (`controllerRoleArns`, decrypt only), drop the operator's decrypt.
 - **Wake hints use the host's credentials.** The host reads every hint with
   `wake_hints`'s credentials, which reach every installation's prefix.
