@@ -30,11 +30,16 @@ func runHost(args []string) error {
 	cfgPath := fs.String("config", "", "host config file")
 	hintPoll := fs.Duration("hint-poll", 15*time.Second, "how often a sleeping workload's hint is read")
 	tick := fs.Duration("tick", time.Second, "control loop period")
+	controllerURL := fs.String("controller", "", "optional control API base URL for assignment pull and credential authorize")
+	hostUID := fs.String("host-id", "", "this host's control-plane UID; required with --controller")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath == "" {
 		return errors.New("--config is required")
+	}
+	if (*controllerURL == "") != (*hostUID == "") {
+		return errors.New("--controller and --host-id must be set together")
 	}
 	cfg, err := workload.Load(*cfgPath)
 	if err != nil {
@@ -72,14 +77,26 @@ func runHost(args []string) error {
 		}
 	}
 	// Per-boot credentials are issued with the agent's own AWS credentials
-	// (the default chain, such as the instance profile).
-	issuer := &bootcred.STS{NewClient: func(region string) (bootcred.AssumeRoler, error) {
+	// (the default chain, such as the instance profile). When --controller
+	// is set, session tags are authorized against that host's placements
+	// before AssumeRole (no STS call on the controller).
+	var issuer bootcred.Issuer = &bootcred.STS{NewClient: func(region string) (bootcred.AssumeRoler, error) {
 		c, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region))
 		if err != nil {
 			return nil, err
 		}
 		return sts.NewFromConfig(c), nil
 	}}
+	if *controllerURL != "" {
+		issuer = &bootcred.Guarded{
+			Inner: issuer,
+			Client: &bootcred.AssignmentClient{
+				BaseURL: *controllerURL,
+				HostUID: *hostUID,
+			},
+		}
+		log.Info("boot credentials guarded by controller assignments", "controller", *controllerURL, "host", *hostUID)
+	}
 	launcher := &guest.QEMU{DataDir: cfg.DataDir}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -9,11 +9,18 @@ import (
 	"github.com/sufuree/sufuree/internal/store"
 )
 
+// DB is the control record file (*store.Store) or a Raft journal that
+// proposes the same Update/View shape.
+type DB interface {
+	Update(func(*store.Tx) error) error
+	View(func(*store.Tx) error) error
+}
+
 // Bolt persists claims in the control store. A stored claim is pending.
 // AcknowledgeHandoff and Cancel delete it; the record cannot change in place.
 // Placement generation is returned to waiters and is not written onto the claim.
 type Bolt struct {
-	Store *store.Store
+	Store DB
 }
 
 // Update runs fn in one store transaction.

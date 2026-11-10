@@ -10,7 +10,7 @@ Sufuree keeps **HashiCorp Raft** (`github.com/hashicorp/raft` + `raft-boltdb/v2`
 
 Do **not** adopt `sufuree/raft` as a dependency until that library exists, passes its own release gates, and Sufuree has a concrete need that HashiCorp cannot meet.
 
-Do **not** treat a library swap as the next Raft work item. The higher-priority gap is putting authoritative control mutations on a replicated log (today `internal/store` bbolt remains authoritative for resource/ops records).
+Do **not** treat a library swap as the next Raft work item. Authoritative control mutations now enter the Raft log via `internal/controlraft` (`restore_store` archive commands); further work is typed ops / multi-voter qualification, not a library rewrite.
 
 ## Because
 
@@ -41,12 +41,12 @@ Until then, treat `sufuree/raft` as an **optional future dependency / contract r
 | --- | --- |
 | Immediate migration to `sufuree/raft` | No library implementation exists. |
 | Blocking Sufuree controller work on a new Raft core | Wrong critical path; fence already works for one voter; record replication is the control-plane gap. |
-| Claiming current HashiCorp use is multi-voter qualified | One voter only; resource writes are not every Raft log entry (see `docs/implementation/rfc-0001-status.md`). |
+| Claiming current HashiCorp use is multi-voter qualified | One voter only; archive-per-Update is the replication unit today (see `docs/implementation/rfc-0001-status.md`). |
 
 ## Consequences
 
-- Continue improving `internal/raftnode` as a thin HashiCorp wrapper (bootstrap/recovery rules, leader-only mutations, optional store Export in snapshots).
-- Prefer logging/applying authoritative control mutations (or an equivalent FSM) before any consensus-library rewrite.
+- Continue improving `internal/raftnode` / `internal/controlraft` (bootstrap/recovery, leader-only mutations, store Export snapshots, eventually typed ops).
+- Prefer multi-voter qualification and tighter command encoding before any consensus-library rewrite.
 - Revisit this ADR when multi-voter qualification starts or when `sufuree/raft` publishes a release candidate.
 
 ## References

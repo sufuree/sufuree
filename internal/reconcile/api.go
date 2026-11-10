@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 //	GET /v1/resources
 //	GET /v1/hosts
 //	GET /v1/hosts/{id}/assignments
+//	POST /v1/hosts/{id}/credentials/{installation}
 //	GET /v1/operations
 //	GET /v1/warm
 //
@@ -69,6 +71,9 @@ func Handler(c *Controller) http.Handler {
 		// a host cannot invent an inst/* scope for an installation it does not hold.
 		writeJSON(w, http.StatusOK, bootscope.AssignmentsForHost(got, id))
 	})
+	mux.HandleFunc("POST /v1/hosts/{id}/credentials/{installation}", func(w http.ResponseWriter, r *http.Request) {
+		postCredentials(c, w, r)
+	})
 	mux.HandleFunc("GET /v1/operations", func(w http.ResponseWriter, r *http.Request) {
 		got, err := c.ListOperations(r.Context())
 		if err != nil {
@@ -86,6 +91,57 @@ func Handler(c *Controller) http.Handler {
 		writeJSON(w, http.StatusOK, got)
 	})
 	return mux
+}
+
+// credentialRequest is the optional body for the bootscope authorize broker.
+// The controller does not call STS; it only returns pinned session tags the
+// host must use when assuming the guest role locally.
+type credentialRequest struct {
+	RequestedTags map[string]string `json:"requested_tags,omitempty"`
+}
+
+type credentialResponse struct {
+	Installation string            `json:"installation"`
+	SessionTags  map[string]string `json:"session_tags"`
+}
+
+func postCredentials(c *Controller, w http.ResponseWriter, r *http.Request) {
+	hostID := r.PathValue("id")
+	installation := r.PathValue("installation")
+	if hostID == "" || installation == "" {
+		http.Error(w, "host id and installation are required", http.StatusBadRequest)
+		return
+	}
+	var req credentialRequest
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "credential request is not JSON", http.StatusBadRequest)
+			return
+		}
+	}
+	placements, err := c.ListPlacementsByHost(r.Context(), hostID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	tags, err := bootscope.Authorize(placements, hostID, installation, req.RequestedTags)
+	if err != nil {
+		switch {
+		case errors.Is(err, bootscope.ErrNotHeld):
+			http.Error(w, err.Error(), http.StatusForbidden)
+		case errors.Is(err, bootscope.ErrTagMismatch):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, credentialResponse{Installation: installation, SessionTags: tags})
 }
 
 func putResource(c *Controller, w http.ResponseWriter, r *http.Request) {
