@@ -294,3 +294,27 @@ func TestRaftSnapshotCarriesFloors(t *testing.T) {
 		t.Fatalf("a bare archive snapshot wiped the floors: %+v", f)
 	}
 }
+
+// TestHostClaimCannotCreateALaterIncarnation: with no controller record, a
+// host claiming incarnation 5 and floor 0 is refused and seeds only H, so
+// an honest host's next grant keeps incarnation 1 and its own floor.
+func TestHostClaimCannotCreateALaterIncarnation(t *testing.T) {
+	st := openStore(t)
+	srv := serve(t, &controlraft.Journal{Store: st})
+	ctx := context.Background()
+	a := &bootfloor.Client{BaseURL: srv.URL, HostUID: "host-a"}
+	claim := bootfloor.Entry{Installation: "inst-1", Incarnation: 5, IncarnationFrom: 9, Generation: 20}
+	if _, err := a.Boot(ctx, "inst-1", claim); !errors.Is(err, bootfloor.ErrBehindHost) {
+		t.Fatalf("boot with a claimed incarnation: %v, want ErrBehindHost", err)
+	}
+	if res, err := a.Report(ctx, []bootfloor.Entry{claim}); err != nil || len(res.Ahead) != 1 {
+		t.Fatalf("report = %+v, %v", res, err)
+	}
+	if f := floorOf(t, st); f.Incarnation != 1 || f.Generation != 20 || f.ProgressEpoch != 0 || f.IncarnationFrom != 0 {
+		t.Fatalf("seeded record = %+v", f)
+	}
+	g, err := a.Boot(ctx, "inst-1", bootfloor.Entry{Incarnation: 1, Generation: 18, Epoch: 17, Seq: 4})
+	if err != nil || g.Incarnation != 1 || g.Generation != 21 || g.ProgressEpoch != 17 || g.ProgressSeq != 4 {
+		t.Fatalf("honest host's grant = %+v, %v", g, err)
+	}
+}

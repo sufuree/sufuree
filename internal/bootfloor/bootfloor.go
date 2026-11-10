@@ -22,8 +22,9 @@
 //     refused (ErrBehindHost) until an operator re-applies the lowering
 //     through Lower, which records the audit again.
 //
-// A controller with no record seeds it from the first host entry, so a
-// standalone host enrols without losing its H or floor.
+// A controller with no record seeds it from the first host entry in
+// incarnation 1, so a standalone host enrols without losing its H or floor.
+// An entry claiming a later incarnation seeds only H and counts as ahead.
 //
 // Commands are applied deterministically by the controller FSM (Apply).
 // Whether the host holds the installation is checked by the leader under
@@ -151,6 +152,14 @@ func Merge(rec *resource.BootFloor, e Entry) (resource.BootFloor, Outcome) {
 		epoch, seq = 0, 0
 	}
 	if rec == nil {
+		if inc > 1 {
+			// Only an audited lowering creates a later incarnation. A host
+			// claiming one (the controller lost the record, say restored
+			// from an older backup) seeds H alone, in incarnation 1; its
+			// floor is never taken, or a grant would carry the claimed
+			// incarnation and lower honest hosts' floors.
+			return resource.BootFloor{Installation: e.Installation, Generation: e.Generation, Incarnation: 1}, Ahead
+		}
 		return resource.BootFloor{
 			Installation: e.Installation, Generation: e.Generation, Incarnation: inc,
 			IncarnationFrom: e.IncarnationFrom, ProgressEpoch: epoch, ProgressSeq: seq,
