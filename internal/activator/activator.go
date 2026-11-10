@@ -389,6 +389,10 @@ func (a *Activator) issueGeneration() (uint64, error) {
 	g, err := a.opt.Floor.Boot(ctx, a.spec.ID, local)
 	if err != nil {
 		if errors.Is(err, bootfloor.ErrBehindHost) {
+			// Report the record so the controller holds one (at least its
+			// H) for the operator to re-apply the lowering against.
+			a.opt.Floor.Note(local)
+			a.opt.Floor.Kick()
 			a.log.Error("ALERT: refusing a boot: the controller is behind this host's floor incarnation (restored from an older backup?); an operator must re-apply the lowering",
 				"incarnation", r.Incarnation)
 		}

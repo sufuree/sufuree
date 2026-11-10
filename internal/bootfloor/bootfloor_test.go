@@ -25,6 +25,7 @@ func TestMerge(t *testing.T) {
 		o    Outcome
 	}{
 		{"no record: seeded from the host", nil, entry(0, 50, 40, 7), *rec(50, 1, 40, 7), Created},
+		{"no record: a claimed later incarnation seeds H only", nil, Entry{Installation: "inst-1", Incarnation: 5, IncarnationFrom: 9, Generation: 50}, *rec(50, 1, 0, 0), Ahead},
 		{"same incarnation: maxima", rec(10, 1, 9, 3), entry(1, 12, 9, 2), *rec(12, 1, 9, 3), Raised},
 		{"same incarnation: higher floor", rec(10, 1, 9, 3), entry(1, 9, 9, 4), *rec(10, 1, 9, 4), Raised},
 		{"same incarnation: nothing new", rec(10, 1, 9, 3), entry(1, 10, 9, 3), *rec(10, 1, 9, 3), Unchanged},

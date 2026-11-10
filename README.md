@@ -168,7 +168,9 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   its random replica ID while it exists. Once released, the next placement
   uses the UID, which is a different `inst/` prefix, so migrate the
   installation's data and host records to the UID before enabling boot
-  floors.
+  floors. An app whose `max_replicas` drops from above 1 to 1 keeps the
+  replica of whichever placement is listed first; any other replica's data
+  is orphaned.
 - **Boot.** Every boot asks the controller for a grant
   (`POST /v1/hosts/{id}/boot/{installation}`), which commits the next
   generation as its own Raft entry. The request carries the host's own record,
@@ -188,7 +190,8 @@ A), so both survive the loss of any host. Production PHI workloads need this.
   never takes that host's floor, because doing so would lower the floor
   without the audited action. Instead it refuses the boot (409), and the host
   logs an alert. An operator then re-applies the lowering with
-  `target_incarnation` set to the host's incarnation.
+  `target_incarnation` set to the host's incarnation. If the controller has
+  no record at all, such a host seeds only the generation, in incarnation 1.
 - **Intentional rollback.** `POST /v1/installations/{id}/floor/lower` with
   `expect_incarnation`, `epoch`, `seq`, `requested_by` (the installation
   owner), `approved_by` (a different Zati operator), `reason` and `reference`.
