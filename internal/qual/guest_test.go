@@ -72,6 +72,21 @@ func TestFixedHostGuestWakeProxyIdle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	hz, err := http.Get(edgeSrv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hz.Body.Close()
+	if hz.StatusCode != 200 {
+		t.Fatalf("healthz = %d", hz.StatusCode)
+	}
+	if st, gen, _, _ := act.Snapshot(); st != activator.Asleep || gen != 1 {
+		t.Fatalf("healthz disturbed guest: state=%s gen=%d", st, gen)
+	}
+	if r, err := j.Get("web"); err != nil || r.Generation != 1 {
+		t.Fatalf("journal after healthz = %+v err=%v", r, err)
+	}
+
 	res, err = http.Get(edgeSrv.URL + "/svc/web/")
 	if err != nil {
 		t.Fatal(err)
@@ -83,18 +98,6 @@ func TestFixedHostGuestWakeProxyIdle(t *testing.T) {
 	}
 	if r, err := j.Get("web"); err != nil || r.Generation != 2 {
 		t.Fatalf("journal generation = %+v err=%v", r, err)
-	}
-
-	hz, err := http.Get(edgeSrv.URL + "/healthz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hz.Body.Close()
-	if hz.StatusCode != 200 {
-		t.Fatalf("healthz = %d", hz.StatusCode)
-	}
-	if st, _, _, _ := act.Snapshot(); st == activator.Waking {
-		t.Fatal("healthz woke the guest")
 	}
 
 	receipt := map[string]any{

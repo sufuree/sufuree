@@ -39,16 +39,17 @@ func (h *HTTP) Boot(_ context.Context, w workload.Spec, generation uint64, env m
 		})
 	}
 	srv := &http.Server{Handler: handler}
-	g := &httpGuest{ln: ln, srv: srv, addr: ln.Addr().String(), exited: make(chan struct{})}
+	g := &httpGuest{srv: srv, addr: ln.Addr().String(), exited: make(chan struct{})}
 	go func() {
 		_ = srv.Serve(ln)
-		close(g.exited)
+		// Unexpected exit (crash path): Stop may still be racing. once ensures
+		// Exited closes exactly once and only after any in-flight Stop finishes.
+		g.once.Do(func() { close(g.exited) })
 	}()
 	return g, nil
 }
 
 type httpGuest struct {
-	ln     net.Listener
 	srv    *http.Server
 	addr   string
 	exited chan struct{}
@@ -61,6 +62,7 @@ func (g *httpGuest) Exited() <-chan struct{} { return g.exited }
 func (g *httpGuest) Stop(grace time.Duration) error {
 	var err error
 	g.once.Do(func() {
+		defer close(g.exited)
 		if grace <= 0 {
 			err = g.srv.Close()
 			return
@@ -68,6 +70,10 @@ func (g *httpGuest) Stop(grace time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
 		err = g.srv.Shutdown(ctx)
+		if err != nil {
+			// Shutdown timed out or failed: force-close leftover connections.
+			_ = g.srv.Close()
+		}
 	})
 	return err
 }

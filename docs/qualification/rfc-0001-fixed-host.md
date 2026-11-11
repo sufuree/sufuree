@@ -34,15 +34,17 @@ qualifies the edge↔activator↔idle contract only.
 
 ## Fixed-host edge upstream publication
 
-When the controller edge should forward after demand handoff to a known
-host-gateway or guest address (host already running):
+`--edge-upstream` publishes a **lease-holding host gateway** dial address
+(App name or UID → `host:port`). The gateway must hold a host activity lease
+for the request lifetime. Do **not** point it at a raw guest port: demand
+handoff alone does not stop idle shutdown.
 
 ```text
 sufuree controller ... \
   --edge-listen 127.0.0.1:8081 \
-  --edge-upstream web=127.0.0.1:9
+  --edge-upstream web=127.0.0.1:gateway-port
 ```
 
-`--edge-upstream` may be repeated. Keys are App **name** or resource UID.
-Co-located edge+host can instead use `edge.HostWake` (see the qual test)
-so each request acquires a host-agent lease and wakes the guest directly.
+For a co-located edge that wakes the guest directly, use `edge.HostWake`
+(see the qual test) or `reconcile.EdgeActivator.HostLeases` so each forward
+acquires a host-agent lease and releases it when proxying finishes.
