@@ -45,6 +45,14 @@ sufuree controller ... \
   --edge-upstream web=127.0.0.1:gateway-port
 ```
 
-For a co-located edge that wakes the guest directly, use `edge.HostWake`
-(see the qual test) or `reconcile.EdgeActivator.HostLeases` so each forward
-acquires a host-agent lease and releases it when proxying finishes.
+Second-hop contract: the published upstream is the host agent's workload
+gateway (`gateway.Gateway` / guest dial address after `Activator.Acquire`),
+not a nested `edge.Server`. A second `edge.Server` would strip `/svc/<name>/`
+again and answer `/healthz` locally without waking the guest. The public
+edge removes the service prefix once, then forwards the remaining path to
+that host gateway, which already holds the activity lease.
+
+For a co-located public edge that wakes the guest directly (no separate host
+gateway hop), use `edge.HostWake` (see the qual test) or
+`reconcile.EdgeActivator.HostLeases` so each forward acquires a host-agent
+lease and releases it when proxying finishes.
