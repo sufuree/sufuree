@@ -466,6 +466,9 @@ func gateExecutor(inner executor.Executor, opt executorOpts) (executor.Executor,
 	if opt.grantMaxHosts < 0 || opt.grantMaxMemory < 0 {
 		return nil, errors.New("--grant-max-hosts and --grant-max-memory-mib must be zero or positive")
 	}
+	if opt.grantExpires < 0 {
+		return nil, errors.New("--grant-expires must be zero or positive")
+	}
 	if opt.grantMaxHosts == 0 && opt.grantMaxMemory == 0 {
 		// memory without an explicit grant keeps the historical uncapped path
 		if _, ok := inner.(*executor.Memory); ok {

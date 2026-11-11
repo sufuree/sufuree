@@ -66,7 +66,9 @@ func (g *Gated) CreateHost(ctx context.Context, in CreateHostInput) (ProviderRef
 }
 
 // TerminateHost terminates via Fence when available, else TerminateHost, then
-// releases the create reservation for that provider when known.
+// releases the create reservation. Adopted hosts (create succeeded in the
+// provider but never recorded in createByProvider) resolve the create
+// OperationID from Describe.
 func (g *Gated) TerminateHost(ctx context.Context, in TerminateHostInput) error {
 	if g == nil || g.Inner == nil || g.Ledger == nil {
 		return errors.New("executor: gated ledger and inner are required")
@@ -78,19 +80,39 @@ func (g *Gated) TerminateHost(ctx context.Context, in TerminateHostInput) error 
 	} else if err := g.Inner.TerminateHost(ctx, in); err != nil {
 		return err
 	}
-	g.mu.Lock()
-	createOp := g.createByProvider[in.ProviderID]
-	if createOp != "" {
-		delete(g.createByProvider, in.ProviderID)
-	}
-	g.mu.Unlock()
-	if createOp == "" {
-		createOp = in.OperationID
+	createOp, err := g.createOperationID(ctx, in)
+	if err != nil {
+		return err
 	}
 	if err := g.Ledger.Release(createOp); err != nil && !errors.Is(err, budget.ErrUnknown) {
 		return fmt.Errorf("executor: terminate succeeded but budget release failed: %w", err)
 	}
 	return nil
+}
+
+func (g *Gated) createOperationID(ctx context.Context, in TerminateHostInput) (string, error) {
+	g.mu.Lock()
+	createOp := g.createByProvider[in.ProviderID]
+	if createOp != "" {
+		delete(g.createByProvider, in.ProviderID)
+		g.mu.Unlock()
+		return createOp, nil
+	}
+	g.mu.Unlock()
+	if in.ProviderID != "" {
+		d, err := g.Inner.Describe(ctx, in.ProviderID)
+		if err != nil {
+			return "", fmt.Errorf("executor: terminated but cannot resolve create operation for budget release: %w", err)
+		}
+		if d.OperationID == "" {
+			return "", errors.New("executor: terminated but host has no create operation id for budget release")
+		}
+		return d.OperationID, nil
+	}
+	if in.OperationID == "" {
+		return "", errors.New("executor: terminate needs a create operation id for budget release")
+	}
+	return in.OperationID, nil
 }
 
 func definiteNoCreate(err error) bool {

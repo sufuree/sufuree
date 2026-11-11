@@ -75,3 +75,29 @@ func TestGatedKeepsReservationOnUnknown(t *testing.T) {
 		t.Fatalf("hosts = %d, want reservation retained", h)
 	}
 }
+
+func TestGatedTerminateReleasesAdoptedHost(t *testing.T) {
+	inner := &Memory{AllowEffects: true}
+	g := &Gated{
+		Inner:  inner,
+		Ledger: &budget.Ledger{Grant: budget.Grant{DeploymentUID: "d1", MaxHosts: 1, MaxMemoryMiB: 512}},
+	}
+	// Simulate unknown create: reservation held, host exists, but Gated never saw success.
+	if err := g.Ledger.ReserveCreate("c-adopt", 256); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Ledger.Confirm("c-adopt"); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := inner.CreateHost(context.Background(), CreateHostInput{OperationID: "c-adopt", MemoryMiB: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.TerminateHost(context.Background(), TerminateHostInput{OperationID: "t-adopt", ProviderID: ref.ProviderID}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := g.Ledger.Usage()
+	if h != 0 {
+		t.Fatalf("hosts = %d after adopt terminate", h)
+	}
+}

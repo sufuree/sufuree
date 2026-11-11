@@ -198,6 +198,10 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 		}},
 	})
 	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorFault() == smithy.FaultClient {
+			return executor.ProviderRef{}, fmt.Errorf("ec2exec: run instances rejected: %w", err)
+		}
 		return executor.ProviderRef{}, fmt.Errorf("%w: ec2exec: run instances: %v", executor.ErrOutcomeUnknown, err)
 	}
 	if len(out.Instances) == 0 || aws.ToString(out.Instances[0].InstanceId) == "" {

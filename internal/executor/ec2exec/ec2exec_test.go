@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/sufuree/sufuree/internal/executor"
 )
@@ -169,6 +170,52 @@ func TestEffectsDisabled(t *testing.T) {
 	}
 	_, err = ex.CreateHost(context.Background(), executor.CreateHostInput{OperationID: "x", MemoryMiB: 128})
 	if !errors.Is(err, executor.ErrEffectsDisabled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+type errEC2 struct {
+	fakeEC2
+	runErr error
+}
+
+func (e *errEC2) RunInstances(ctx context.Context, in *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
+	if e.runErr != nil {
+		return nil, e.runErr
+	}
+	return e.fakeEC2.RunInstances(ctx, in, optFns...)
+}
+
+func TestRunInstancesClientFaultIsDefinite(t *testing.T) {
+	client := &errEC2{runErr: &smithy.GenericAPIError{
+		Code: "InvalidAMIID.NotFound", Message: "bad ami", Fault: smithy.FaultClient,
+	}}
+	ex, err := New(Config{
+		Client: client, DeploymentUID: "d", AllowEffects: true,
+		Launch: Launch{AMI: "ami-x", InstanceType: "t3.micro", SubnetID: "subnet-1", SecurityGroupID: "sg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ex.CreateHost(context.Background(), executor.CreateHostInput{OperationID: "op", MemoryMiB: 128})
+	if err == nil || errors.Is(err, executor.ErrOutcomeUnknown) {
+		t.Fatalf("err = %v, want definite client rejection", err)
+	}
+}
+
+func TestRunInstancesServerFaultIsUnknown(t *testing.T) {
+	client := &errEC2{runErr: &smithy.GenericAPIError{
+		Code: "InternalError", Message: "boom", Fault: smithy.FaultServer,
+	}}
+	ex, err := New(Config{
+		Client: client, DeploymentUID: "d", AllowEffects: true,
+		Launch: Launch{AMI: "ami-x", InstanceType: "t3.micro", SubnetID: "subnet-1", SecurityGroupID: "sg-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ex.CreateHost(context.Background(), executor.CreateHostInput{OperationID: "op", MemoryMiB: 128})
+	if !errors.Is(err, executor.ErrOutcomeUnknown) {
 		t.Fatalf("err = %v", err)
 	}
 }
