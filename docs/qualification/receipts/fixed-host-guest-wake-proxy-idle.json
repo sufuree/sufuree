@@ -1,0 +1,9 @@
+{
+  "aws_spend": false,
+  "launcher": "guest.HTTP",
+  "qemu_pin": "deferred-to-live-host",
+  "qualified_at": "2026-11-11T05:00:50Z",
+  "rewake_gen": 2,
+  "scenario": "fixed-host-guest-wake-proxy-idle",
+  "wake_gen": 1
+}

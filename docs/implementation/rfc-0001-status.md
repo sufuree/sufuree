@@ -17,7 +17,7 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 | Demand | Join/Cancel/AcknowledgeHandoff; coalesce per resource UID | Cross-process lost-ack proofs on real host gateway |
 | Placement | Pack-first; one capacity op; minHosts=0; unknown ops reserve; warm observe/active with `reserve_mib` | Adaptive warm math, anti-affinity, cloud quiet-period proof |
 | Reconcile | Intent before dispatch; timeout → unknown; status write; ready-placement handoff bridge | Injected provider crash, budget ledger |
-| Edge | Mounted via `--edge-listen`; `/svc/<name>/`, Host routing, 503/429, `/healthz` no wake | TLS, real host-gateway upstream publication, admission under load |
+| Edge | Mounted via `--edge-listen`; `/svc/<name>/`, Host routing, 503/429, `/healthz` no wake; `--edge-upstream name=addr` for fixed-host publication; `edge.HostWake` for co-located host-agent wake | TLS, host-posted upstream publication, admission under load |
 | Host assignments | `GET /v1/hosts/{id}/assignments`; host `--controller` + `--host-id` pulls via `bootcred.AssignmentClient` | Watch/push transport; multi-host enrollment |
 | Boot credential scope | `POST /v1/hosts/{id}/credentials/{installation}` authorizes pinned tags (no STS on controller); `bootcred.Guarded` forces those tags before host AssumeRole | Controller-issued STS; AWS executor fences |
 | Replica credentials | `--replica-credentials`: per-installation SeaweedFS identities limited to `inst/<id>/*`, derived from a KMS-wrapped provisioning key, registered through the signed filer API and probed before use, delivered on the credentials route | Identity removal on delete; per-installation hint reader credentials |
@@ -28,7 +28,8 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 
 Every gate in RFC-0001 §10 and every scenario in §11 still needs a receipt.
 Local (no-AWS) slices: Raft/bootscope
-([rfc-0001-local.md](../qualification/rfc-0001-local.md)) and grant-gated 0↔1
-(`TestLocalZeroOneZeroWithGrant`). Cloud path checklist:
-[rfc-0001-cloud-path.md](../qualification/rfc-0001-cloud-path.md).
-Live EC2 and fixed-host guest E2E remain open (authorized spend required).
+([rfc-0001-local.md](../qualification/rfc-0001-local.md)), grant-gated 0↔1
+(`TestLocalZeroOneZeroWithGrant`), and fixed-host guest wake/proxy/idle
+([rfc-0001-fixed-host.md](../qualification/rfc-0001-fixed-host.md)). Cloud path
+checklist: [rfc-0001-cloud-path.md](../qualification/rfc-0001-cloud-path.md).
+Live QEMU pin and live EC2 0↔1 / two-host drain remain open (spend/image auth).
