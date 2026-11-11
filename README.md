@@ -135,18 +135,32 @@ as any read error) and records it in
 restart does not let an older signed hint be replayed. If that record cannot be
 read or written the agent logs it and carries on, and the next restart may accept
 one older hint.
-Hint keys rotate at every boot. A hint naming generation `g` verifies only with
-the key of the newest boot at or below `g`, so a key taken from one guest signs
-nothing for a later boot, and restarting a workload replaces its key. The
-earlier boot's key is kept until a hint from a later boot is accepted (a
-sleeping workload's last hint must keep verifying) and is then dropped. Until
-then, whoever holds the earlier key can still sign hints for the earlier boot's
-generations. A keyring holds at most 16 keys: after that many boots in a row
-without an accepted hint, the oldest boot's hints are refused. A single key
-left by an earlier agent (`<id>.key`) is adopted for the generations before the
-first boot and removed from disk. The keyring is host-local, so a workload
-that moves to another host starts a new one there, and the new host can't
-verify the hint the old host's guest left.
+Hint keys rotate at every boot. A signed hint must name its boot's generation
+(`generation_env_key`), and verifies only with that boot's key: a key taken
+from one guest signs nothing for any other boot, and restarting a workload
+replaces its key. The earlier boot's key is kept until a hint from a later boot
+is accepted (a sleeping workload's last hint must keep verifying) and is then
+dropped. Until then, whoever holds the earlier key can still sign hints for
+that earlier boot. Limits:
+
+- A keyring holds at most 16 keys. Every boot attempt takes one, so after that
+  many attempts in a row without an accepted hint, the oldest of those boots'
+  hints are refused. The key of the last accepted hint is always kept.
+- A single key left by an earlier agent (`<id>.key`) is adopted for the
+  generations before the first boot and removed from disk. Until that first
+  boot it verifies a hint naming any generation, as before.
+- If dropping keys can't be saved, the agent logs it. A restart before the next
+  save brings the dropped keys back; they sign only stale hints unless the
+  replay record is also lost.
+- A boot fails closed if its generation is not above the keyring's newest
+  boot, which happens only if the agent's journal was lost or reset while
+  `hintkeys/` survived. Recover by removing `hintkeys/<id>.keys` and
+  `hintkeys/<id>.last`; the workload's last hint is then unverifiable until
+  its next boot publishes.
+- The keyring is host-local, so a workload that moves to another host starts
+  a new one there, and the new host can't verify the hint the old host's
+  guest left.
+
 A hint may also report `progress`, an (`epoch`, `seq`) position the workload
 says is durably committed. With `progress_env_key`, the agent keeps the highest
 progress it has read (from every hint read, before each boot, and right after

@@ -182,6 +182,9 @@ func runHost(args []string) error {
 				return fmt.Errorf("workload %s: hint_key_env_key needs wake_hints", w.ID)
 			}
 			id := w.ID
+			keys.OnSaveError = func(err error) {
+				log.Warn("dropped hint keys could not be removed from disk; an agent restart brings them back until the next save", "workload", id, "err", err)
+			}
 			opt.HintKeys, wh = keys, &wakehint.Verifying{Source: src, Keys: keys,
 				Record: filepath.Join(cfg.DataDir, "hintkeys", w.ID+".last"),
 				OnRefused: func(err error) {
