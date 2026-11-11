@@ -12,16 +12,27 @@ import (
 	"github.com/sufuree/sufuree/internal/store"
 )
 
+// HostLease holds a host-agent activity lease for the life of one edge
+// forward. Acquire must wake/keep the guest until release is called.
+type HostLease interface {
+	Acquire(ctx context.Context) (addr string, release func(), err error)
+}
+
 // EdgeActivator admits a named App through the demand manager and returns a
-// host-local upstream only after handoff. Without a registered upstream map
-// entry it still completes handoff when a ready placement exists, but returns
-// an error so the edge answers 503 rather than inventing an address.
+// host-local upstream only after handoff. Without a registered upstream or
+// host lease it still completes handoff when a ready placement exists, but
+// returns an error so the edge answers 503 rather than inventing an address.
 type EdgeActivator struct {
 	Controller *Controller
 	Demand     *demand.Manager
-	// Upstreams maps resource UID or App name → dial address once a host
-	// agent (or fixed-host operator flag) has published one. Empty means
-	// activation can hand off but not forward.
+	// HostLeases maps App name → host activity lease. When set for a service,
+	// Acquire takes the lease after demand handoff and returns that address
+	// and release so the guest cannot idle-stop mid-forward. Prefer this for
+	// direct guest addresses.
+	HostLeases map[string]HostLease
+	// Upstreams maps resource UID or App name → dial address of a
+	// lease-holding host gateway (not a raw guest). Empty release is safe
+	// only because the gateway holds its own activity lease while proxying.
 	Upstreams map[string]string
 	Wait      time.Duration
 }
@@ -54,6 +65,9 @@ func (a *EdgeActivator) Acquire(r *http.Request, service string) (string, func()
 		if result.Err != nil {
 			return "", nil, result.Err
 		}
+		if lease := a.HostLeases[res.Name]; lease != nil {
+			return lease.Acquire(r.Context())
+		}
 		addr := ""
 		if a.Upstreams != nil {
 			addr = a.Upstreams[res.UID]
@@ -64,6 +78,7 @@ func (a *EdgeActivator) Acquire(r *http.Request, service string) (string, func()
 		if addr == "" {
 			return "", nil, fmt.Errorf("reconcile: no upstream for %s after handoff gen %d", res.UID, result.PlacementGeneration)
 		}
+		// Upstream-only: gateway must hold the host activity lease itself.
 		return addr, func() {}, nil
 	}
 }

@@ -30,7 +30,8 @@ func TestHostWakeProxiesThroughActivator(t *testing.T) {
 	})
 	t.Cleanup(srv.Close)
 
-	res, err := http.Get(srv.URL + "/svc/web/")
+	client := &http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get(srv.URL + "/svc/web/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestHostWakeProxiesThroughActivator(t *testing.T) {
 		t.Fatalf("status=%d body=%q acquires=%d", res.StatusCode, body, host.n)
 	}
 
-	res, err = http.Get(srv.URL + "/svc/other/")
+	res, err = client.Get(srv.URL + "/svc/other/")
 	if err != nil {
 		t.Fatal(err)
 	}

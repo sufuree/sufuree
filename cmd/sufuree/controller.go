@@ -70,7 +70,7 @@ func runController(args []string) error {
 	edgeListen := fs.String("edge-listen", "", "optional public HTTP edge listen address")
 	edgeMax := fs.Int("edge-max-concurrent", 256, "edge concurrent request cap; 0 disables the cap")
 	var edgeUpstreams kvFlags
-	fs.Var(&edgeUpstreams, "edge-upstream", "fixed-host upstream name=host:port (repeatable); App name or UID → dial address after demand handoff")
+	fs.Var(&edgeUpstreams, "edge-upstream", "lease-holding host gateway name=host:port (repeatable); not a raw guest address — use HostWake/HostLeases for direct guests")
 	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts")
 	tlsCert := fs.String("tls-cert", "", "control API server certificate (from `sufuree ca issue --role controller`)")
 	tlsKey := fs.String("tls-key", "", "control API server key")
@@ -230,6 +230,8 @@ func runController(args []string) error {
 		if err != nil {
 			return err
 		}
+		// Upstreams are dial addresses of host gateways that hold activity
+		// leases while proxying. Direct guests need HostLeases / HostWake.
 		edgeSrv = &http.Server{Handler: &edge.Server{
 			Activator: &reconcile.EdgeActivator{
 				Controller: c, Demand: dem, Upstreams: edgeUpstreams.Map(),
