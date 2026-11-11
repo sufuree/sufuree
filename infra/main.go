@@ -1,6 +1,6 @@
 // Command sufuree-infra declares Sufuree's AWS infrastructure: the KMS keys
-// that wrap the controller CA key and the replica credential provisioning
-// key.
+// that wrap the controller CA key, the replica credential provisioning key
+// and the object store's CA key.
 package main
 
 import (
@@ -59,6 +59,16 @@ func keyPolicy(accountID, purpose string, uses ...map[string]any) (string, error
 func caKeyPolicy(accountID, operatorArn string) (string, error) {
 	return keyPolicy(accountID, "sufuree-control-ca", map[string]any{
 		"Sid":       "OperatorWrapsSufureeCA",
+		"Principal": map[string]any{"AWS": operatorArn},
+		"Action":    []string{"kms:Encrypt", "kms:Decrypt"},
+	})
+}
+
+// storeCAKeyPolicy: the operator wraps and unwraps the object store's CA
+// key (sufuree store-ca).
+func storeCAKeyPolicy(accountID, operatorArn string) (string, error) {
+	return keyPolicy(accountID, "sufuree-store-ca", map[string]any{
+		"Sid":       "OperatorWrapsStoreCA",
 		"Principal": map[string]any{"AWS": operatorArn},
 		"Action":    []string{"kms:Encrypt", "kms:Decrypt"},
 	})
@@ -141,6 +151,17 @@ func main() {
 		}
 		ctx.Export("replicaKeyArn", rkey.Arn)
 		ctx.Export("replicaKeyAlias", pulumi.String("alias/sufuree-replica-credentials"))
+
+		spolicy, err := storeCAKeyPolicy(id.AccountId, operatorArn)
+		if err != nil {
+			return err
+		}
+		skey, err := wrappingKey(ctx, "sufuree-store-ca", "Object store (SeaweedFS) CA key wrapping", spolicy)
+		if err != nil {
+			return err
+		}
+		ctx.Export("storeCAKeyArn", skey.Arn)
+		ctx.Export("storeCAKeyAlias", pulumi.String("alias/sufuree-store-ca"))
 		return nil
 	})
 }

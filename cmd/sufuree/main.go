@@ -41,6 +41,8 @@ func run(args []string) error {
 		return runApp(args[1:])
 	case "ca":
 		return runCA(args[1:])
+	case "store-ca":
+		return runStoreCA(args[1:])
 	case "replica-key":
 		return runReplicaKey(args[1:])
 	case "version":

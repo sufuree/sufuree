@@ -111,3 +111,38 @@ func TestFilerClientPresentsItsCertificate(t *testing.T) {
 		t.Errorf("half a client certificate: %v", err)
 	}
 }
+
+// TestStoreCACommand: store-ca init and issue write a CA and certificates
+// the controller CA's commands refuse, and the reverse.
+func TestStoreCACommand(t *testing.T) {
+	dir := t.TempDir()
+	store, control := filepath.Join(dir, "store"), filepath.Join(dir, "control")
+	if err := runStoreCA([]string{"init", "--dir", store}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCA([]string{"init", "--dir", control}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStoreCA([]string{"issue", "--dir", store, "--name", "filer", "--server-name", "127.0.0.1,filer.internal", "--out", filepath.Join(dir, "filer")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStoreCA([]string{"issue", "--dir", store, "--name", "sufuree", "--out", filepath.Join(dir, "sufuree")}); err != nil {
+		t.Fatal(err)
+	}
+	// The issued client certificate is one the controller's filer client loads.
+	if _, err := httpClient(filepath.Join(store, "ca.crt"), filepath.Join(dir, "sufuree.crt"), filepath.Join(dir, "sufuree.key")); err != nil {
+		t.Fatalf("the filer client refused a store-ca client certificate: %v", err)
+	}
+	for name, err := range map[string]error{
+		"replacing an issued certificate":         runStoreCA([]string{"issue", "--dir", store, "--name", "filer", "--out", filepath.Join(dir, "filer")}),
+		"a name with a comma":                     runStoreCA([]string{"issue", "--dir", store, "--name", "a,b", "--out", filepath.Join(dir, "x")}),
+		"store-ca issue from the controller CA":   runStoreCA([]string{"issue", "--dir", control, "--name", "filer", "--out", filepath.Join(dir, "y")}),
+		"ca issue from the store CA":              runCA([]string{"issue", "--dir", store, "--role", "operator", "--name", "op", "--out", filepath.Join(dir, "z")}),
+		"store-ca init over an existing store CA": runStoreCA([]string{"init", "--dir", store}),
+		"no arguments":                            runStoreCA(nil),
+	} {
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
