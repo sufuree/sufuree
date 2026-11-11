@@ -31,8 +31,14 @@ const (
 )
 
 var (
-	// ErrNotLeader means the node is not the leader, so Apply did not propose a command.
+	// ErrNotLeader means the node was not the leader at admission, so Apply
+	// did not propose a command. It is safe to retry elsewhere.
 	ErrNotLeader = errors.New("raftnode: not leader")
+	// ErrOutcomeUnknown means leadership was lost or the node shut down after
+	// a command may have been admitted: the command might still be committed
+	// and applied. Callers must reconcile by application-owned operation
+	// identity; this error is never proof that nothing happened.
+	ErrOutcomeUnknown = errors.New("raftnode: outcome unknown; command may have been committed")
 	// ErrExistingState means Bootstrap is set and raft state is already stored.
 	ErrExistingState = errors.New("raftnode: raft state already exists")
 	// ErrRecoveryRequired means Bootstrap is false and the directory has no raft state.
@@ -291,9 +297,11 @@ func (n *Node) Term() (uint64, error) {
 }
 
 // Apply proposes cmd to the log. It returns ErrNotLeader when this node is
-// not the leader, including after Close. timeout bounds how long the proposal
-// may wait to be enqueued. A command the FSM rejects is returned after the
-// log entry is committed.
+// not the leader at admission. If leadership is lost or the node shuts down
+// while the proposal is in flight, it returns ErrOutcomeUnknown: the command
+// may still commit, so callers must reconcile rather than assume rollback.
+// timeout bounds how long the proposal may wait to be enqueued. A command the
+// FSM rejects is returned after the log entry is committed.
 func (n *Node) Apply(ctx context.Context, cmd []byte, timeout time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -327,8 +335,15 @@ func wrapLeader(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, raft.ErrNotLeader) || errors.Is(err, raft.ErrLeadershipLost) || errors.Is(err, raft.ErrRaftShutdown) {
+	// Not leader at admission: the command was not proposed.
+	if errors.Is(err, raft.ErrNotLeader) {
 		return fmt.Errorf("%w: %v", ErrNotLeader, err)
+	}
+	// Leadership lost or shutdown after admission: the outcome is unknown;
+	// the command may already be committed. Conflating this with ErrNotLeader
+	// would tell callers a possibly-committed command never happened.
+	if errors.Is(err, raft.ErrLeadershipLost) || errors.Is(err, raft.ErrRaftShutdown) {
+		return fmt.Errorf("%w: %v", ErrOutcomeUnknown, err)
 	}
 	return err
 }

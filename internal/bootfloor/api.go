@@ -387,7 +387,7 @@ func writeErr(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrStaleEpoch), errors.Is(err, ErrBehindHost), errors.Is(err, ErrNoMatchingRequest):
 		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, raftnode.ErrNotLeader):
+	case errors.Is(err, raftnode.ErrNotLeader), errors.Is(err, raftnode.ErrOutcomeUnknown):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
