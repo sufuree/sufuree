@@ -19,7 +19,9 @@ func TestHTTPBootReadyAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := http.Get("http://" + g.Addr() + "/")
+	t.Cleanup(func() { _ = g.Stop(0) })
+	client := &http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get("http://" + g.Addr() + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +40,17 @@ func TestHTTPBootReadyAndStop(t *testing.T) {
 	}
 }
 
+func waitStarted(t *testing.T, started <-chan struct{}, errc <-chan error) {
+	t.Helper()
+	select {
+	case <-started:
+	case err := <-errc:
+		t.Fatalf("request failed before handler started: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for handler start")
+	}
+}
+
 func TestHTTPStopWaitsForHandlerThenSignalsExit(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -50,19 +63,23 @@ func TestHTTPStopWaitsForHandlerThenSignalsExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = g.Stop(0) })
 
+	client := &http.Client{Timeout: 5 * time.Second}
+	errc := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		res, err := http.Get("http://" + g.Addr() + "/")
+		res, err := client.Get("http://" + g.Addr() + "/")
 		if err != nil {
-			t.Error(err)
+			errc <- err
 			return
 		}
 		res.Body.Close()
+		errc <- nil
 	}()
-	<-started
+	waitStarted(t, started, errc)
 
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- g.Stop(time.Second) }()
@@ -75,6 +92,9 @@ func TestHTTPStopWaitsForHandlerThenSignalsExit(t *testing.T) {
 
 	close(release)
 	wg.Wait()
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
 	if err := <-stopDone; err != nil {
 		t.Fatal(err)
 	}
@@ -95,10 +115,12 @@ func TestHTTPStopForceClosesAfterGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = g.Stop(0) })
 
+	client := &http.Client{Timeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
-		res, err := http.Get("http://" + g.Addr() + "/")
+		res, err := client.Get("http://" + g.Addr() + "/")
 		if err != nil {
 			errCh <- err
 			return
@@ -106,7 +128,7 @@ func TestHTTPStopForceClosesAfterGrace(t *testing.T) {
 		res.Body.Close()
 		errCh <- nil
 	}()
-	<-started
+	waitStarted(t, started, errCh)
 
 	stopErr := g.Stop(30 * time.Millisecond)
 	if stopErr == nil {
