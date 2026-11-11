@@ -19,8 +19,9 @@ import (
 type EdgeActivator struct {
 	Controller *Controller
 	Demand     *demand.Manager
-	// Upstreams maps resource UID → dial address once a host agent has
-	// published one. Empty means activation can hand off but not forward.
+	// Upstreams maps resource UID or App name → dial address once a host
+	// agent (or fixed-host operator flag) has published one. Empty means
+	// activation can hand off but not forward.
 	Upstreams map[string]string
 	Wait      time.Duration
 }
@@ -56,6 +57,9 @@ func (a *EdgeActivator) Acquire(r *http.Request, service string) (string, func()
 		addr := ""
 		if a.Upstreams != nil {
 			addr = a.Upstreams[res.UID]
+			if addr == "" {
+				addr = a.Upstreams[res.Name]
+			}
 		}
 		if addr == "" {
 			return "", nil, fmt.Errorf("reconcile: no upstream for %s after handoff gen %d", res.UID, result.PlacementGeneration)

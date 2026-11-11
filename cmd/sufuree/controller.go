@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -68,6 +69,8 @@ func runController(args []string) error {
 	raftBootstrap := fs.Bool("raft-bootstrap", false, "create the initial one-voter raft configuration; refuse if raft state already exists")
 	edgeListen := fs.String("edge-listen", "", "optional public HTTP edge listen address")
 	edgeMax := fs.Int("edge-max-concurrent", 256, "edge concurrent request cap; 0 disables the cap")
+	var edgeUpstreams kvFlags
+	fs.Var(&edgeUpstreams, "edge-upstream", "fixed-host upstream name=host:port (repeatable); App name or UID → dial address after demand handoff")
 	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts")
 	tlsCert := fs.String("tls-cert", "", "control API server certificate (from `sufuree ca issue --role controller`)")
 	tlsKey := fs.String("tls-key", "", "control API server key")
@@ -228,7 +231,9 @@ func runController(args []string) error {
 			return err
 		}
 		edgeSrv = &http.Server{Handler: &edge.Server{
-			Activator:     &reconcile.EdgeActivator{Controller: c, Demand: dem},
+			Activator: &reconcile.EdgeActivator{
+				Controller: c, Demand: dem, Upstreams: edgeUpstreams.Map(),
+			},
 			MaxConcurrent: *edgeMax,
 		}}
 	}
@@ -405,6 +410,43 @@ func reconcileWhenLeader(ctx context.Context, node *raftnode.Node, c *reconcile.
 		case <-ticker.C:
 		}
 	}
+}
+
+// kvFlags collects repeatable key=value flags (for --edge-upstream).
+type kvFlags map[string]string
+
+func (k *kvFlags) String() string {
+	if k == nil || len(*k) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(*k))
+	for key, val := range *k {
+		parts = append(parts, key+"="+val)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (k *kvFlags) Set(v string) error {
+	key, val, ok := strings.Cut(v, "=")
+	if !ok || key == "" || val == "" {
+		return fmt.Errorf("want name=host:port, got %q", v)
+	}
+	if *k == nil {
+		*k = kvFlags{}
+	}
+	(*k)[key] = val
+	return nil
+}
+
+func (k kvFlags) Map() map[string]string {
+	if len(k) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(k))
+	for key, val := range k {
+		out[key] = val
+	}
+	return out
 }
 
 type executorOpts struct {
