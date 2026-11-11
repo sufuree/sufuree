@@ -112,7 +112,14 @@ names it `<id>-g<generation>`, so CloudTrail attributes every use to a workload
 and a generation. A boot fails rather than start without them. They are for
 start-up and are not refreshed, so a guest must not depend on them after
 `duration`. `wake_hints`
-takes a `ca_file` for a store with a private CA.
+takes a `ca_file` for a store with a private CA. Set each workload's
+`hint_prefix` to `hints/<id>`, outside its replica prefix, and give the host's
+hint key (`SUFUREE_HINT_ACCESS_KEY`) only `Read:<bucket>/hints/*`: hints hold
+no replica data, so a host's key then reads no installation's data. Each
+installation's replica identity may write its own `hints/<id>/*` and not
+read it back. The guest must publish there too (Zati
+`ZATI_REPLICA_HINT_PREFIX=hints/<id>`); the MAC binds the prefix, so host and
+guest change together.
 One agent holds each `data_dir` (an exclusive `flock`, so `data_dir` must be on a local filesystem, not NFS). The Ops store
 (`$HOME/.ops` of the agent's user) must belong to the agent alone: run it as
 a dedicated user. Before creating a `state` or `boot` volume the agent moves
@@ -310,7 +317,8 @@ the production isolation boundary.
 
 With `sufuree controller --replica-credentials replica.json` and a workload
 with `replica_credentials`, each guest gets object-store credentials that
-reach only its own installation's prefix, `<bucket>/inst/<id>/*`, rather than
+reach only its own installation's prefix, `<bucket>/inst/<id>/*` (and write,
+not read, its wake hint under `<bucket>/hints/<id>/*`), rather than
 one credential shared by every guest. Production PHI workloads need this: with
 a shared credential, one compromised guest could read every installation's
 replica.
@@ -384,7 +392,10 @@ The SeaweedFS deployment must:
   identity.
 
 Verified against SeaweedFS 4.48 (`TestSeaweedFS`): each installation's
-credentials read, write, conditionally create and list only its own prefix.
+credentials read, write, conditionally create and list only its own prefix,
+and write its own hint under `hints/<id>/` but not another's, and can't read
+it back. A key with only `Read:<bucket>/hints/*` reads a hint and is refused
+reading `inst/` and writing anywhere.
 They are refused reading, writing or listing another installation's prefix,
 writing a neighboring prefix such as `inst/<id>x/`, listing the bucket, and
 reading through a `..` key. Raising the version revokes the old
@@ -407,5 +418,6 @@ Limits:
   development controller), so the operator alone can derive every
   installation's credentials. Once controllers run under their own roles
   (`controllerRoleArns`, decrypt only), drop the operator's decrypt.
-- **Wake hints use the host's credentials.** The host reads every hint with
-  `wake_hints`'s credentials, which reach every installation's prefix.
+- **A host's hint key reads every installation's hint.** With hints under
+  `hints/`, that is busy, next due and progress, not replica data. A
+  `hint_prefix` left inside `inst/<id>` needs a key that reaches `inst/`.

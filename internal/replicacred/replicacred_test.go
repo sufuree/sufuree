@@ -89,7 +89,8 @@ func TestIdentityIsLimitedToTheInstallationPrefix(t *testing.T) {
 	if err := json.Unmarshal(doc, &got); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"Read:zati/inst/inst-a/*", "Write:zati/inst/inst-a/*", "List:zati/inst/inst-a/*", "Tagging:zati/inst/inst-a/*"}
+	want := []string{"Read:zati/inst/inst-a/*", "Write:zati/inst/inst-a/*", "List:zati/inst/inst-a/*", "Tagging:zati/inst/inst-a/*",
+		"Write:zati/hints/inst-a/*"}
 	if got.Name != "sufuree-inst-a" || strings.Join(got.Actions, ",") != strings.Join(want, ",") {
 		t.Fatalf("identity = %+v", got)
 	}
