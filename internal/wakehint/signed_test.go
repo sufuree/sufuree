@@ -411,6 +411,17 @@ func TestKeyringAdoptsTheSingleKey(t *testing.T) {
 	if _, err := OpenKeyring(dir, "w2"); err == nil {
 		t.Fatal("a short single key was adopted")
 	}
+	for name, body := range map[string]string{
+		"no bound":           `{"version":1,"keys":[{"generation":0,"key":"` + hex.EncodeToString(testKey()) + `","legacy":true},{"generation":8,"key":"` + hex.EncodeToString(k8) + `"}]}`,
+		"a bound above boot": `{"version":1,"keys":[{"generation":0,"key":"` + hex.EncodeToString(testKey()) + `","legacy":true,"below":9},{"generation":8,"key":"` + hex.EncodeToString(k8) + `"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "bad.keys"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenKeyring(dir, "bad"); err == nil {
+			t.Errorf("a keyring whose single key has %s was accepted", name)
+		}
+	}
 	// Beside an existing keyring a leftover single key is not read, only
 	// removed at the next save.
 	if err := os.WriteFile(old, []byte("short"), 0o644); err != nil {
@@ -527,5 +538,41 @@ func TestKeyringReportsAFailedDrop(t *testing.T) {
 	r.Accepted(6)
 	if len(errs) != 1 || r.For(5) != nil || r.For(6) == nil {
 		t.Fatalf("a failed drop: %d errors reported, key 5 kept=%v", len(errs), r.For(5) != nil)
+	}
+}
+
+// TestKeyringKeepsTheRecordedHintsKey: a hint served only through the
+// record (the stored one is refused) keeps its key through the bound, so
+// the record still verifies after another restart.
+func TestKeyringKeepsTheRecordedHintsKey(t *testing.T) {
+	ctx, p := context.Background(), "inst/w1"
+	dir := t.TempDir()
+	record := filepath.Join(dir, "w1.last")
+	// An agent from before rotation left its key and its record.
+	if err := os.WriteFile(filepath.Join(dir, "w1.key"), testKey(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, sign(testKey(), p, hintAt(5, 3)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gone := &rawStore{data: []byte("tampered")}
+	r, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, ok, err := (&Verifying{Source: gone, Keys: r, Record: record}).Read(ctx, p); !errors.Is(err, ErrFallback) || !ok || h.Seq != 3 {
+		t.Fatalf("the recorded hint: %+v, %v, %v", h, ok, err)
+	}
+	for g := uint64(6); g < 6+maxRingKeys+2; g++ {
+		if _, err := r.ForBoot(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r2, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, ok, err := (&Verifying{Source: gone, Keys: r2, Record: record}).Read(ctx, p); !errors.Is(err, ErrFallback) || !ok || h.Seq != 3 {
+		t.Fatalf("the recorded hint after the bound and a restart: %+v, %v, %v", h, ok, err)
 	}
 }

@@ -148,7 +148,9 @@ that earlier boot. Limits:
   hints are refused. The key of the last accepted hint is always kept.
 - A single key left by an earlier agent (`<id>.key`) is adopted for the
   generations before the first boot and removed from disk. Until that first
-  boot it verifies a hint naming any generation, as before.
+  boot it verifies a hint naming any generation, as before: whoever holds it
+  can get a hint naming a far generation accepted, and the first boot's hints
+  are then refused as older until the agent restarts.
 - If dropping keys can't be saved, the agent logs it. A restart before the next
   save brings the dropped keys back; they sign only stale hints unless the
   replay record is also lost.
