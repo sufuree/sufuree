@@ -12,6 +12,7 @@ Minimum reliable cloud/runtime qualification, in order:
 ```text
 sufuree controller \
   --data-dir ./data --listen 127.0.0.1:8080 \
+  --tls-cert controller.pem --tls-key controller-key.pem --tls-client-ca ca.pem \
   --deployment dep-qual \
   --executor ec2 \
   --grant-max-hosts 2 --grant-max-memory-mib 4096 --grant-expires 8h \
@@ -22,12 +23,20 @@ sufuree controller \
   --ec2-security-group sg-...
 ```
 
+`--executor ec2` requires mutual TLS on the control API.
+
 `--executor ec2` loads the default AWS credential chain and **will** call
 RunInstances / TerminateInstances. Do not pass it without an explicit spend
 grant for that deployment.
 
+The growth ledger is **in-memory for this slice**. Restarting the controller
+while EC2 instances from a prior process are still live does **not** re-seed
+grant usage; do not restart a live `--executor ec2` controller until durable
+ledger reconstruction lands, or you risk exceeding `--grant-max-hosts`.
+
 `--executor memory` with the same `--grant-*` flags exercises the ledger
-without cloud spend. Without grant flags, memory stays uncapped (dev path).
+without cloud spend. Without grant flags (both exactly `0`), memory stays
+uncapped (dev path). Negative grant flags are rejected.
 
 ## Local receipts (no AWS)
 

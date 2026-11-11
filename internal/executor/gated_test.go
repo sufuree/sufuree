@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -50,5 +51,27 @@ func TestGatedCreateFailureReleases(t *testing.T) {
 	h, _ := g.Ledger.Usage()
 	if h != 0 {
 		t.Fatalf("hosts = %d", h)
+	}
+}
+
+type uncertainExec struct {
+	Memory
+}
+
+func (u *uncertainExec) CreateHost(context.Context, CreateHostInput) (ProviderRef, error) {
+	return ProviderRef{}, fmt.Errorf("%w: timed out", ErrOutcomeUnknown)
+}
+
+func TestGatedKeepsReservationOnUnknown(t *testing.T) {
+	g := &Gated{
+		Inner:  &uncertainExec{Memory: Memory{AllowEffects: true}},
+		Ledger: &budget.Ledger{Grant: budget.Grant{DeploymentUID: "d1", MaxHosts: 1, MaxMemoryMiB: 512}},
+	}
+	if _, err := g.CreateHost(context.Background(), CreateHostInput{OperationID: "c1", MemoryMiB: 256}); !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err = %v", err)
+	}
+	h, _ := g.Ledger.Usage()
+	if h != 1 {
+		t.Fatalf("hosts = %d, want reservation retained", h)
 	}
 }

@@ -113,6 +113,9 @@ func runController(args []string) error {
 		}
 		replica = svc
 	}
+	if *execName == "ec2" && (*tlsCert == "" || *tlsKey == "" || *tlsClientCA == "") {
+		return errors.New("--executor ec2 requires --tls-cert, --tls-key and --tls-client-ca")
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	effects, err := buildExecutor(*execName, executorOpts{
 		deployment:       *deployment,
@@ -460,7 +463,10 @@ func buildExecutor(name string, opt executorOpts) (executor.Executor, error) {
 }
 
 func gateExecutor(inner executor.Executor, opt executorOpts) (executor.Executor, error) {
-	if opt.grantMaxHosts < 1 && opt.grantMaxMemory < 1 {
+	if opt.grantMaxHosts < 0 || opt.grantMaxMemory < 0 {
+		return nil, errors.New("--grant-max-hosts and --grant-max-memory-mib must be zero or positive")
+	}
+	if opt.grantMaxHosts == 0 && opt.grantMaxMemory == 0 {
 		// memory without an explicit grant keeps the historical uncapped path
 		if _, ok := inner.(*executor.Memory); ok {
 			return inner, nil

@@ -118,19 +118,34 @@ func TestCreateIdempotentAndFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, err := ex.CreateHost(context.Background(), executor.CreateHostInput{
-		OperationID: "op-create-1", MemoryMiB: 256,
+		OperationID: "op-create-1", MemoryMiB: 256, CPU: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	again, err := ex.CreateHost(context.Background(), executor.CreateHostInput{
-		OperationID: "op-create-1", MemoryMiB: 256,
+		OperationID: "op-create-1", MemoryMiB: 256, CPU: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again.ProviderID != ref.ProviderID || fake.runN != 1 {
 		t.Fatalf("ref=%s again=%s runs=%d", ref.ProviderID, again.ProviderID, fake.runN)
+	}
+	if again.MemoryMiB != 256 {
+		t.Fatalf("again.MemoryMiB = %d", again.MemoryMiB)
+	}
+	d0, err := ex.Describe(context.Background(), ref.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d0.MemoryMiB != 256 {
+		t.Fatalf("describe MemoryMiB = %d", d0.MemoryMiB)
+	}
+	if _, err := ex.CreateHost(context.Background(), executor.CreateHostInput{
+		OperationID: "op-bad-shape", MemoryMiB: 256, Shape: "m5.large",
+	}); err == nil {
+		t.Fatal("expected unapproved shape rejection")
 	}
 	if err := ex.Fence(context.Background(), ref.ProviderID); err != nil {
 		t.Fatal(err)

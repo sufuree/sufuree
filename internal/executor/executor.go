@@ -22,6 +22,10 @@ var ErrNotImplemented = errors.New("executor: not implemented")
 // timed-out create never happened on a real provider.
 var ErrNotFound = errors.New("executor: host not found")
 
+// ErrOutcomeUnknown means a mutation may have run in the provider; the caller
+// must reconcile by operation identity and must not free reserved capacity.
+var ErrOutcomeUnknown = errors.New("executor: provider outcome unknown")
+
 // HostDesc is observed provider state for one host.
 type HostDesc struct {
 	ID          string

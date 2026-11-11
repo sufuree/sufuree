@@ -9,10 +9,17 @@ import (
 	"github.com/sufuree/sufuree/internal/budget"
 )
 
+// HostFencer terminates a provider host and waits for terminal state.
+type HostFencer interface {
+	Fence(ctx context.Context, providerID string) error
+}
+
 // Gated wraps an Executor with a growth grant and capacity ledger.
-// CreateHost reserves before the inner call and releases on failure.
-// After a successful create, the create OperationID is remembered by
-// provider ID so TerminateHost can free the correct reservation.
+// CreateHost reserves before the inner call. Reservations are released only
+// when the create is known not to have run; ambiguous provider errors keep
+// the reservation until reconciliation. Terminate prefers Fence when the
+// inner executor implements HostFencer so grant capacity frees only after
+// observed termination.
 type Gated struct {
 	Inner  Executor
 	Ledger *budget.Ledger
@@ -41,7 +48,9 @@ func (g *Gated) CreateHost(ctx context.Context, in CreateHostInput) (ProviderRef
 	}
 	ref, err := g.Inner.CreateHost(ctx, in)
 	if err != nil {
-		_ = g.Ledger.Release(in.OperationID)
+		if definiteNoCreate(err) {
+			_ = g.Ledger.Release(in.OperationID)
+		}
 		return ProviderRef{}, err
 	}
 	if err := g.Ledger.Confirm(in.OperationID); err != nil {
@@ -56,13 +65,17 @@ func (g *Gated) CreateHost(ctx context.Context, in CreateHostInput) (ProviderRef
 	return ref, nil
 }
 
-// TerminateHost terminates via the inner executor, then releases the create
-// reservation for that provider when known.
+// TerminateHost terminates via Fence when available, else TerminateHost, then
+// releases the create reservation for that provider when known.
 func (g *Gated) TerminateHost(ctx context.Context, in TerminateHostInput) error {
 	if g == nil || g.Inner == nil || g.Ledger == nil {
 		return errors.New("executor: gated ledger and inner are required")
 	}
-	if err := g.Inner.TerminateHost(ctx, in); err != nil {
+	if f, ok := g.Inner.(HostFencer); ok && in.ProviderID != "" {
+		if err := f.Fence(ctx, in.ProviderID); err != nil {
+			return err
+		}
+	} else if err := g.Inner.TerminateHost(ctx, in); err != nil {
 		return err
 	}
 	g.mu.Lock()
@@ -78,6 +91,16 @@ func (g *Gated) TerminateHost(ctx context.Context, in TerminateHostInput) error 
 		return fmt.Errorf("executor: terminate succeeded but budget release failed: %w", err)
 	}
 	return nil
+}
+
+func definiteNoCreate(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrOutcomeUnknown) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	return true
 }
 
 // AttachVolume delegates.
