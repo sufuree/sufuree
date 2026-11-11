@@ -3,7 +3,10 @@ package replicacred
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -21,13 +24,18 @@ import (
 //
 //	SUFUREE_SEAWEED_FILER, SUFUREE_SEAWEED_S3, SUFUREE_SEAWEED_BUCKET,
 //	SUFUREE_SEAWEED_FILER_WRITE_KEY, SUFUREE_SEAWEED_FILER_READ_KEY
+//
+// For a TLS deployment (Zati's poc/nanos/seaweedfs-tls profile) also set
+// SUFUREE_SEAWEED_CA_FILE and, for a filer that requires a client
+// certificate, SUFUREE_SEAWEED_CLIENT_CERT and SUFUREE_SEAWEED_CLIENT_KEY.
 func TestSeaweedFS(t *testing.T) {
 	filer, s3url, bucket := os.Getenv("SUFUREE_SEAWEED_FILER"), os.Getenv("SUFUREE_SEAWEED_S3"), os.Getenv("SUFUREE_SEAWEED_BUCKET")
 	if filer == "" || s3url == "" || bucket == "" {
 		t.Skip("set SUFUREE_SEAWEED_FILER, SUFUREE_SEAWEED_S3 and SUFUREE_SEAWEED_BUCKET to run against SeaweedFS")
 	}
 	ctx := context.Background()
-	reg := &FilerRegistrar{BaseURL: filer, Probe: S3Probe(s3url, "", nil),
+	s3HTTP, filerHTTP := seaweedClients(t)
+	reg := &FilerRegistrar{BaseURL: filer, HTTP: filerHTTP, Probe: S3Probe(s3url, "", s3HTTP),
 		WriteKey: []byte(os.Getenv("SUFUREE_SEAWEED_FILER_WRITE_KEY")), ReadKey: []byte(os.Getenv("SUFUREE_SEAWEED_FILER_READ_KEY"))}
 	suffix := time.Now().Format("150405.000000")
 	a, b := "it-a-"+suffix, "it-b-"+suffix
@@ -49,7 +57,7 @@ func TestSeaweedFS(t *testing.T) {
 		_ = reg.remove(b)
 	})
 	client := func(c Credentials) *awss3.Client {
-		return awss3.New(awss3.Options{Region: "us-east-1", BaseEndpoint: aws.String(s3url), UsePathStyle: true,
+		return awss3.New(awss3.Options{Region: "us-east-1", BaseEndpoint: aws.String(s3url), UsePathStyle: true, HTTPClient: s3HTTP,
 			Credentials: credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, "")})
 	}
 	put := func(c Credentials, key string, cond bool) error {
@@ -130,8 +138,40 @@ func TestSeaweedFS(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	// Signed reads: an unsigned read of an identity file is refused.
-	unsigned := &FilerRegistrar{BaseURL: filer}
+	unsigned := &FilerRegistrar{BaseURL: filer, HTTP: filerHTTP}
 	if _, err := unsigned.Current(ctx, a); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("an unsigned read of an identity file: %v, want 401", err)
 	}
+}
+
+// seaweedClients returns the S3 and filer HTTP clients for TestSeaweedFS:
+// trusting SUFUREE_SEAWEED_CA_FILE when set, and with the filer client
+// presenting SUFUREE_SEAWEED_CLIENT_CERT when set.
+func seaweedClients(t *testing.T) (s3, filer *http.Client) {
+	t.Helper()
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if ca := os.Getenv("SUFUREE_SEAWEED_CA_FILE"); ca != "" {
+		b, err := os.ReadFile(ca)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.RootCAs = x509.NewCertPool()
+		if !cfg.RootCAs.AppendCertsFromPEM(b) {
+			t.Fatalf("%s holds no certificate", ca)
+		}
+	}
+	client := func(c *tls.Config) *http.Client {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = c
+		return &http.Client{Transport: tr, Timeout: 15 * time.Second}
+	}
+	s3 = client(cfg.Clone())
+	if cert := os.Getenv("SUFUREE_SEAWEED_CLIENT_CERT"); cert != "" {
+		pair, err := tls.LoadX509KeyPair(cert, os.Getenv("SUFUREE_SEAWEED_CLIENT_KEY"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+	}
+	return s3, client(cfg)
 }

@@ -327,9 +327,15 @@ replica.
 ```json
 {"key_file": "/etc/sufuree/replica-key.json", "key_version": 1, "bucket": "zati",
  "filer": {"url": "https://filer:8888", "ca_file": "/etc/sufuree/filer-ca.pem",
+           "client_cert_file": "/etc/sufuree/filer-client.crt", "client_key_file": "/etc/sufuree/filer-client.key",
            "write_jwt_key_file": "/etc/sufuree/filer-write.jwt", "read_jwt_key_file": "/etc/sufuree/filer-read.jwt"},
  "s3": {"url": "https://s3:8333", "ca_file": "/etc/sufuree/s3-ca.pem", "region": "us-east-1"}}
 ```
+
+`client_cert_file` and `client_key_file` are optional. Set both for a filer
+that requires a client certificate, as Zati's SeaweedFS TLS profile
+(`poc/nanos/seaweedfs-tls`) does. The key file must be readable only by its
+owner.
 
 The SeaweedFS deployment must:
 
@@ -354,6 +360,11 @@ They are refused reading, writing or listing another installation's prefix,
 writing a neighboring prefix such as `inst/<id>x/`, listing the bucket, and
 reading through a `..` key. Raising the version revokes the old
 key, and an unsigned read of an identity file is refused.
+The same test passes against Zati's SeaweedFS TLS profile (HTTPS S3, and a
+filer that requires a client certificate and signed requests), with
+`SUFUREE_SEAWEED_CA_FILE`, `SUFUREE_SEAWEED_CLIENT_CERT` and
+`SUFUREE_SEAWEED_CLIENT_KEY`. Without the client certificate the filer refuses
+the handshake.
 
 Limits:
 - **A host keeps credentials it was given.** An installation that moves

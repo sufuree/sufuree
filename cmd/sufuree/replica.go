@@ -61,6 +61,11 @@ type replicaConfig struct {
 	Filer      struct {
 		URL    string `json:"url"`
 		CAFile string `json:"ca_file"`
+		// ClientCertFile and ClientKeyFile are the certificate the
+		// controller presents to a filer that requires mutual TLS (the
+		// SeaweedFS TLS profile). Set both or neither.
+		ClientCertFile string `json:"client_cert_file"`
+		ClientKeyFile  string `json:"client_key_file"`
 		// WriteJWTKeyFile and ReadJWTKeyFile hold the filer's
 		// jwt.filer_signing.key and jwt.filer_signing.read.key.
 		WriteJWTKeyFile string `json:"write_jwt_key_file"`
@@ -126,11 +131,11 @@ func loadReplicaService(ctx context.Context, path string) (*replicacred.Service,
 	if err != nil {
 		return nil, err
 	}
-	filerHTTP, err := httpClientWithCA(cfg.Filer.CAFile)
+	filerHTTP, err := httpClient(cfg.Filer.CAFile, cfg.Filer.ClientCertFile, cfg.Filer.ClientKeyFile)
 	if err != nil {
 		return nil, err
 	}
-	s3HTTP, err := httpClientWithCA(cfg.S3.CAFile)
+	s3HTTP, err := httpClient(cfg.S3.CAFile, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -160,11 +165,31 @@ func readJWTKey(path string) ([]byte, error) {
 	return k, nil
 }
 
-// httpClientWithCA trusts only caFile's certificates for this client, or
-// the system roots when caFile is empty.
-func httpClientWithCA(caFile string) (*http.Client, error) {
+// httpClient trusts only caFile's certificates for this client, or the
+// system roots when caFile is empty. With certFile and keyFile it presents
+// that client certificate; the key must be readable only by its owner.
+func httpClient(caFile, certFile, keyFile string) (*http.Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	switch {
+	case (certFile == "") != (keyFile == ""):
+		return nil, errors.New("--replica-credentials: set both client_cert_file and client_key_file, or neither")
+	case certFile != "":
+		certPEM, err := os.ReadFile(certFile)
+		if err != nil {
+			return nil, err
+		}
+		keyPEM, err := controlauth.ReadPrivate(keyFile)
+		if err != nil {
+			return nil, err
+		}
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		clear(keyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("--replica-credentials: client certificate: %w", err)
+		}
+		tr.TLSClientConfig.Certificates = []tls.Certificate{cert}
+	}
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
