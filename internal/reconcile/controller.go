@@ -201,9 +201,11 @@ func (c *Controller) finishDeletes() error {
 // call starts after the last installation the previous one tried,
 // wrapping around, so revocations that keep failing don't starve the
 // rest. A failure is logged and retried on a later call.
-func (c *Controller) revokeOnce(ctx context.Context) {
+//
+// It returns how many revocations it tried and how many of those failed.
+func (c *Controller) revokeOnce(ctx context.Context) (tried, failed int) {
 	if c.revoker == nil {
-		return
+		return 0, 0
 	}
 	var pending []resource.Revocation
 	if err := c.db.View(func(tx *store.Tx) error {
@@ -231,17 +233,19 @@ func (c *Controller) revokeOnce(ctx context.Context) {
 		return nil
 	}); err != nil {
 		c.log.Error("list revocations", "err", err)
-		return
+		return 0, 0
 	}
 	for _, r := range pending {
 		if ctx.Err() != nil {
-			return
+			return tried, failed
 		}
+		tried++
 		c.revokeCursor = r.Installation
 		rctx, cancel := context.WithTimeout(ctx, revokeTimeout)
 		err := c.revoker.Revoke(rctx, r.Installation)
 		cancel()
 		if err != nil {
+			failed++
 			c.log.Error("revoke installation identity", "installation", r.Installation, "err", err)
 			continue
 		}
@@ -251,20 +255,45 @@ func (c *Controller) revokeOnce(ctx context.Context) {
 			c.log.Error("record revocation", "installation", r.Installation, "err", err)
 		}
 	}
+	return tried, failed
 }
 
-// revokeLoop runs revokeOnce every tick until ctx ends.
+// revokeLoop runs revokeOnce every tick until ctx ends. After a round in
+// which every attempt failed (the filer is down, say) it waits longer,
+// doubling up to revokeMaxBackoff, so an outage costs a few requests and
+// log lines a minute rather than sixteen a second. Any success resets it.
 func (c *Controller) revokeLoop(ctx context.Context) {
-	t := time.NewTicker(c.tick)
-	defer t.Stop()
+	wait := c.tick
 	for {
-		c.revokeOnce(ctx)
+		tried, failed := c.revokeOnce(ctx)
+		wait = nextRevokeWait(wait, c.tick, tried, failed)
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// revokeMaxBackoff caps the wait after rounds that only failed.
+const revokeMaxBackoff = time.Minute
+
+// nextRevokeWait is the wait before the next round: tick normally, doubled
+// (to revokeMaxBackoff) after a round in which every attempt failed.
+func nextRevokeWait(prev, tick time.Duration, tried, failed int) time.Duration {
+	if tried == 0 || failed < tried {
+		return tick
+	}
+	next := prev * 2
+	if next < tick {
+		next = tick
+	}
+	if next > revokeMaxBackoff {
+		next = revokeMaxBackoff
+	}
+	return next
 }
 
 // ApplyResource creates or updates a resource if ResourceVersion matches the

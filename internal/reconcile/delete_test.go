@@ -310,3 +310,60 @@ func TestEdgeRefusesADeletingAppWithoutAClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRevokeWaitBacksOffOnlyWhenARoundOnlyFailed(t *testing.T) {
+	t.Parallel()
+	tick := time.Second
+	for _, c := range []struct {
+		name          string
+		prev          time.Duration
+		tried, failed int
+		want          time.Duration
+	}{
+		{"idle", 8 * time.Second, 0, 0, tick},
+		{"some worked", 8 * time.Second, 3, 2, tick},
+		{"first failure", tick, 2, 2, 2 * time.Second},
+		{"doubles", 8 * time.Second, 1, 1, 16 * time.Second},
+		{"capped", 50 * time.Second, 5, 5, revokeMaxBackoff},
+	} {
+		if got := nextRevokeWait(c.prev, tick, c.tried, c.failed); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRunRevokesAlongsideReconciling runs both loops together (for -race)
+// and checks Run returns once its context ends.
+func TestRunRevokesAlongsideReconciling(t *testing.T) {
+	t.Parallel()
+	st := openStore(t)
+	putMeta(t, st)
+	rev := &fakeRevoker{}
+	c := New(st, &executor.Memory{}, nil, Options{Tick: 5 * time.Millisecond, Logger: discard(), Revoker: rev})
+	seedPlacement(t, c, st, "h1", "app-web", resource.PhaseReady)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	if _, err := c.DeleteResource(ctx, resource.KindApp, "web", 0); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(rev.calls()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the running controller never revoked the deleted app")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	if got := rev.calls(); got[0] != "app-web" {
+		t.Fatalf("revoked %v", got)
+	}
+}
