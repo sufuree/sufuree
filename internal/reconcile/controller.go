@@ -55,7 +55,7 @@ type Revoker interface {
 	Revoke(ctx context.Context, installation string) error
 }
 
-// revokeBatch bounds the revocations one pass works through.
+// revokeBatch bounds the revocations one revokeOnce works through.
 const revokeBatch = 16
 
 // revokeTimeout bounds one revocation.
@@ -72,6 +72,9 @@ type Controller struct {
 	log     *slog.Logger
 	last    time.Time
 	revoker Revoker
+	// revokeCursor is the last installation revokeOnce tried. Only the
+	// revocation loop touches it.
+	revokeCursor string
 
 	mu     sync.Mutex
 	buffer *placement.BufferRecommendation
@@ -99,6 +102,12 @@ func New(db DB, exec executor.Executor, dem *demand.Manager, opt Options) *Contr
 // Run reconciles until ctx is cancelled. A failed pass is logged and retried
 // on the next tick; it is not reported as a successful scale action.
 func (c *Controller) Run(ctx context.Context) error {
+	revoking := make(chan struct{})
+	go func() {
+		defer close(revoking)
+		c.revokeLoop(ctx)
+	}()
+	defer func() { <-revoking }()
 	t := time.NewTicker(c.tick)
 	defer t.Stop()
 	for {
@@ -142,7 +151,6 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 	if err := c.finishDeletes(); err != nil {
 		return err
 	}
-	c.revokePending(ctx)
 	return c.AcknowledgeReadyPlacements(ctx)
 }
 
@@ -187,27 +195,49 @@ func (c *Controller) finishDeletes() error {
 	})
 }
 
-// revokePending removes the identities of pending revocations, a bounded
-// batch per pass, and records each one done. A failure is logged and
-// retried next pass.
-func (c *Controller) revokePending(ctx context.Context) {
+// revokeOnce removes the identities of up to revokeBatch queued
+// revocations and records each one done. It runs in its own loop, not the
+// reconcile pass, so a slow or hung store can't hold up placement. Each
+// call starts after the last installation the previous one tried,
+// wrapping around, so revocations that keep failing don't starve the
+// rest. A failure is logged and retried on a later call.
+func (c *Controller) revokeOnce(ctx context.Context) {
 	if c.revoker == nil {
 		return
 	}
 	var pending []resource.Revocation
 	if err := c.db.View(func(tx *store.Tx) error {
-		all, err := tx.ListRevocations()
-		for _, r := range all {
-			if r.Pending() && len(pending) < revokeBatch {
-				pending = append(pending, r)
+		got, _, err := tx.PendingRevocations(c.revokeCursor, revokeBatch)
+		if err != nil {
+			return err
+		}
+		if len(got) < revokeBatch && c.revokeCursor != "" {
+			// Wrap around to the start of the queue.
+			head, _, err := tx.PendingRevocations("", revokeBatch-len(got))
+			if err != nil {
+				return err
+			}
+			seen := map[string]bool{}
+			for _, r := range got {
+				seen[r.Installation] = true
+			}
+			for _, r := range head {
+				if !seen[r.Installation] {
+					got = append(got, r)
+				}
 			}
 		}
-		return err
+		pending = got
+		return nil
 	}); err != nil {
 		c.log.Error("list revocations", "err", err)
 		return
 	}
 	for _, r := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		c.revokeCursor = r.Installation
 		rctx, cancel := context.WithTimeout(ctx, revokeTimeout)
 		err := c.revoker.Revoke(rctx, r.Installation)
 		cancel()
@@ -219,6 +249,20 @@ func (c *Controller) revokePending(ctx context.Context) {
 			return tx.MarkRevoked(r.Installation, c.planNow())
 		}); err != nil {
 			c.log.Error("record revocation", "installation", r.Installation, "err", err)
+		}
+	}
+}
+
+// revokeLoop runs revokeOnce every tick until ctx ends.
+func (c *Controller) revokeLoop(ctx context.Context) {
+	t := time.NewTicker(c.tick)
+	defer t.Stop()
+	for {
+		c.revokeOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

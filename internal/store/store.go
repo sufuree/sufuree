@@ -40,7 +40,7 @@ var (
 	bucketMeta       = []byte("meta")
 	allBuckets       = [][]byte{
 		bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketMeta,
-		bucketRevocations,
+		bucketRevocations, bucketRevokeQueue,
 	}
 )
 
@@ -207,7 +207,7 @@ func (tx *Tx) ensureSchema() error {
 }
 
 func (tx *Tx) emptyData() (bool, error) {
-	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketRevocations} {
+	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketRevocations, bucketRevokeQueue} {
 		b, err := tx.bucket(name)
 		if err != nil {
 			return false, err

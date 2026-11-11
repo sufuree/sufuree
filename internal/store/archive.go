@@ -140,7 +140,7 @@ func (tx *Tx) installArchive(arch archive) error {
 			continue
 		}
 		// Archives written before revocations existed have none.
-		if string(name) == string(bucketRevocations) {
+		if string(name) == string(bucketRevocations) || string(name) == string(bucketRevokeQueue) {
 			byName[string(name)] = archiveBucket{Name: string(name)}
 			continue
 		}

@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sufuree/sufuree/internal/demand"
 	"github.com/sufuree/sufuree/internal/executor"
+	"github.com/sufuree/sufuree/internal/replicacred"
 	"github.com/sufuree/sufuree/internal/resource"
 	"github.com/sufuree/sufuree/internal/store"
 )
@@ -90,6 +92,7 @@ func TestDeleteAppReleasesItRemovesItAndRevokesItsIdentity(t *testing.T) {
 		if err := c.ReconcileOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
+		c.revokeOnce(ctx)
 	}
 	if _, err := c.GetResource(ctx, resource.KindApp, "web"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the deleted app is still there: %v", err)
@@ -98,8 +101,8 @@ func TestDeleteAppReleasesItRemovesItAndRevokesItsIdentity(t *testing.T) {
 		t.Fatalf("GET after delete = %v, %v", res.StatusCode, err)
 	}
 	r := revocation(t, st, app.UID)
-	if !r.Pending() || r.ResourceUID != app.UID {
-		t.Fatalf("revocation = %+v", r)
+	if !r.Pending() || r.ResourceUID != app.UID || len(queued(t, st)) != 1 {
+		t.Fatalf("revocation = %+v, queue %v", r, queued(t, st))
 	}
 
 	// The revoker recovers: the next pass removes the identity, once.
@@ -110,11 +113,12 @@ func TestDeleteAppReleasesItRemovesItAndRevokesItsIdentity(t *testing.T) {
 		if err := c.ReconcileOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
+		c.revokeOnce(ctx)
 	}
 	if got := rev.calls(); len(got) != 1 || got[0] != app.UID {
 		t.Fatalf("revoked %v", got)
 	}
-	if r := revocation(t, st, app.UID); r.Pending() {
+	if r := revocation(t, st, app.UID); r.Pending() || len(queued(t, st)) != 0 {
 		t.Fatal("the revocation was not recorded done")
 	}
 
@@ -174,4 +178,135 @@ func revocation(t *testing.T, st *store.Store, installation string) resource.Rev
 		t.Fatal(err)
 	}
 	return r
+}
+
+func queued(t *testing.T, st *store.Store) []string {
+	t.Helper()
+	var out []string
+	if err := st.View(func(tx *store.Tx) error {
+		got, _, err := tx.PendingRevocations("", 1000)
+		for _, r := range got {
+			out = append(out, r.Installation)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// failingRevoker fails for the installations in fail.
+type failingRevoker struct {
+	fakeRevoker
+	fail map[string]bool
+}
+
+func (f *failingRevoker) Revoke(ctx context.Context, installation string) error {
+	if f.fail[installation] {
+		return errors.New("filer refused")
+	}
+	return f.fakeRevoker.Revoke(ctx, installation)
+}
+
+func TestRevocationsThatKeepFailingDontStarveTheRest(t *testing.T) {
+	t.Parallel()
+	c, st := newController(t, &executor.Memory{}, time.Now, 0)
+	fail := map[string]bool{}
+	app := applyApp(t, c)
+	// revokeBatch one-off replicas that always fail sort first; one that
+	// works sorts after them.
+	var ids []string
+	for i := 0; i < revokeBatch; i++ {
+		id := "r0" + strconv.Itoa(10+i)
+		fail[id] = true
+		ids = append(ids, id)
+	}
+	ids = append(ids, "r999")
+	pool := applyPool(t, c)
+	now := time.Now().UTC()
+	if err := st.Update(func(tx *store.Tx) error {
+		if err := tx.PutHost(resource.Host{UID: "h1", PoolUID: pool.UID, ProviderID: "i-h1", MemoryMiB: 4096, Ready: true, ObservedAt: now}); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := tx.PutPlacement(resource.Placement{UID: "p-" + id, ResourceUID: app.UID, HostUID: "h1", Replica: id,
+				Generation: 1, OwnerEpoch: 1, MemoryMiB: 128, Phase: resource.PhaseReady, UpdatedAt: now}); err != nil {
+				return err
+			}
+		}
+		for _, id := range ids {
+			if err := tx.DeletePlacement("p-" + id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := queued(t, st); len(got) != len(ids) {
+		t.Fatalf("queued %v", got)
+	}
+	rev := &failingRevoker{fail: fail}
+	c.revoker = rev
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		c.revokeOnce(ctx)
+	}
+	if got := rev.calls(); len(got) != 1 || got[0] != "r999" {
+		t.Fatalf("revoked %v: the working revocation was starved", got)
+	}
+	// A one-off replica ID leaves no record once revoked; the failing
+	// ones stay queued.
+	if got := queued(t, st); len(got) != revokeBatch {
+		t.Fatalf("queued after revoking: %v", got)
+	}
+	if err := st.View(func(tx *store.Tx) error {
+		all, err := tx.ListRevocations()
+		if len(all) != 0 {
+			t.Errorf("one-off replica IDs left tombstones: %+v", all)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokedInstallationGetsGoneFromTheCredentialsRoute(t *testing.T) {
+	t.Parallel()
+	c, st := newController(t, &executor.Memory{}, time.Now, 0)
+	seedPlacement(t, c, st, "h1", "inst-1", resource.PhaseReady)
+	srv := httptest.NewServer(HandlerWith(c, &fakeReplica{err: replicacred.ErrRevoked}))
+	t.Cleanup(srv.Close)
+	res, _ := postCreds(t, srv.URL+"/v1/hosts/h1/credentials/inst-1")
+	if res.StatusCode != http.StatusGone {
+		t.Fatalf("status %d, want 410", res.StatusCode)
+	}
+}
+
+func TestEdgeRefusesADeletingAppWithoutAClaim(t *testing.T) {
+	t.Parallel()
+	c, st := newController(t, &executor.Memory{}, time.Now, 0)
+	app := applyApp(t, c)
+	ctx := context.Background()
+	if _, err := c.DeleteResource(ctx, resource.KindApp, app.Name, 0); err != nil {
+		t.Fatal(err)
+	}
+	act := &EdgeActivator{Controller: c, Demand: demand.New(demand.Bolt{Store: st}), Wait: 5 * time.Second}
+	req := httptest.NewRequest(http.MethodGet, "http://edge/", nil)
+	start := time.Now()
+	if _, _, err := act.Acquire(req, app.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Acquire on a deleting app: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Acquire waited %s", d)
+	}
+	if err := st.View(func(tx *store.Tx) error {
+		claims, err := tx.ListClaims()
+		if len(claims) != 0 {
+			t.Errorf("a claim was made: %+v", claims)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

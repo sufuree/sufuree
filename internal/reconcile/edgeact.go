@@ -46,6 +46,10 @@ func (a *EdgeActivator) Acquire(r *http.Request, service string) (string, func()
 	if err != nil {
 		return "", nil, err
 	}
+	if res.Lifecycle == resource.LifecycleDeleting {
+		// Nothing will place it; a claim would only hold up the delete.
+		return "", nil, fmt.Errorf("reconcile: app %s is being deleted: %w", service, store.ErrNotFound)
+	}
 	wait := a.Wait
 	if wait <= 0 {
 		wait = 15 * time.Second
