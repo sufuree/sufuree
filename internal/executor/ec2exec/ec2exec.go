@@ -6,16 +6,18 @@ package ec2exec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/sufuree/sufuree/internal/executor"
 )
@@ -24,6 +26,8 @@ const (
 	tagDeployment = "sufuree:deployment"
 	tagOperation  = "sufuree:operation"
 	tagManaged    = "sufuree:managed"
+	tagMemoryMiB  = "sufuree:memory_mib"
+	tagCPU        = "sufuree:cpu"
 )
 
 // API is the EC2 surface this executor needs (for fakes in tests).
@@ -94,6 +98,9 @@ func (e *Executor) Describe(ctx context.Context, id string) (executor.HostDesc, 
 		InstanceIds: []string{id},
 	})
 	if err != nil {
+		if !invalidInstanceID(err) {
+			return executor.HostDesc{}, err
+		}
 		// Fall back to tag search for operation IDs that are not instance ids.
 		return e.describeByOperation(ctx, id)
 	}
@@ -133,6 +140,14 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 	if err := e.cfg.Launch.validate(); err != nil {
 		return executor.ProviderRef{}, err
 	}
+	mem := in.MemoryMiB
+	if mem <= 0 {
+		mem = 256
+	}
+	shape := e.cfg.Launch.InstanceType
+	if in.Shape != "" && in.Shape != shape {
+		return executor.ProviderRef{}, fmt.Errorf("ec2exec: instance type %q is not approved", in.Shape)
+	}
 	e.mu.Lock()
 	if pid, ok := e.byOp[in.OperationID]; ok {
 		e.mu.Unlock()
@@ -140,14 +155,14 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 		if err != nil {
 			return executor.ProviderRef{}, err
 		}
-		return refOf(d), nil
+		return refWithRequest(d, mem, in.CPU), nil
 	}
 	e.mu.Unlock()
 
 	// Idempotent retry: provider may already have the instance from a timeout.
 	if d, err := e.describeByOperation(ctx, in.OperationID); err == nil && d.ProviderID != "" {
 		e.remember(in.OperationID, d.ProviderID)
-		return refOf(d), nil
+		return refWithRequest(d, mem, in.CPU), nil
 	}
 
 	token := clientToken(in.OperationID)
@@ -155,6 +170,8 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 		{Key: aws.String(tagDeployment), Value: aws.String(e.cfg.DeploymentUID)},
 		{Key: aws.String(tagOperation), Value: aws.String(in.OperationID)},
 		{Key: aws.String(tagManaged), Value: aws.String("true")},
+		{Key: aws.String(tagMemoryMiB), Value: aws.String(strconv.Itoa(mem))},
+		{Key: aws.String(tagCPU), Value: aws.String(strconv.Itoa(in.CPU))},
 	}
 	if e.cfg.Launch.NamePrefix != "" {
 		tags = append(tags, types.Tag{
@@ -166,10 +183,6 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 			continue
 		}
 		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	shape := e.cfg.Launch.InstanceType
-	if in.Shape != "" {
-		shape = in.Shape
 	}
 	out, err := e.cfg.Client.RunInstances(ctx, &ec2.RunInstancesInput{
 		ImageId:          aws.String(e.cfg.Launch.AMI),
@@ -185,18 +198,14 @@ func (e *Executor) CreateHost(ctx context.Context, in executor.CreateHostInput) 
 		}},
 	})
 	if err != nil {
-		return executor.ProviderRef{}, fmt.Errorf("ec2exec: run instances: %w", err)
+		return executor.ProviderRef{}, fmt.Errorf("%w: ec2exec: run instances: %v", executor.ErrOutcomeUnknown, err)
 	}
 	if len(out.Instances) == 0 || aws.ToString(out.Instances[0].InstanceId) == "" {
-		return executor.ProviderRef{}, errors.New("ec2exec: run instances returned no instance")
+		return executor.ProviderRef{}, fmt.Errorf("%w: ec2exec: run instances returned no instance", executor.ErrOutcomeUnknown)
 	}
 	inst := out.Instances[0]
 	pid := aws.ToString(inst.InstanceId)
 	e.remember(in.OperationID, pid)
-	mem := in.MemoryMiB
-	if mem <= 0 {
-		mem = 256
-	}
 	return executor.ProviderRef{
 		ProviderID: pid,
 		Shape:      shape,
@@ -301,22 +310,21 @@ func (l Launch) validate() error {
 }
 
 func clientToken(operationID string) string {
-	var b strings.Builder
-	for _, r := range operationID {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("+=./-", r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
+	sum := sha256.Sum256([]byte(operationID))
+	return hex.EncodeToString(sum[:]) // 64 hex chars, within EC2 ClientToken limit
+}
+
+func invalidInstanceID(err error) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
 	}
-	s := b.String()
-	if s == "" {
-		s = "op"
+	switch apiErr.ErrorCode() {
+	case "InvalidInstanceID.Malformed", "InvalidInstanceID.NotFound":
+		return true
+	default:
+		return false
 	}
-	if len(s) > 64 {
-		s = s[:64]
-	}
-	return s
 }
 
 func firstInstance(out *ec2.DescribeInstancesOutput) (types.Instance, bool) {
@@ -339,25 +347,40 @@ func descOf(inst types.Instance) executor.HostDesc {
 		state = string(inst.State.Name)
 	}
 	op := ""
+	mem, cpu := 0, 0
 	for _, t := range inst.Tags {
-		if aws.ToString(t.Key) == tagOperation {
+		switch aws.ToString(t.Key) {
+		case tagOperation:
 			op = aws.ToString(t.Value)
+		case tagMemoryMiB:
+			mem, _ = strconv.Atoi(aws.ToString(t.Value))
+		case tagCPU:
+			cpu, _ = strconv.Atoi(aws.ToString(t.Value))
 		}
 	}
 	return executor.HostDesc{
 		ID:          aws.ToString(inst.InstanceId),
 		ProviderID:  aws.ToString(inst.InstanceId),
 		Shape:       string(inst.InstanceType),
+		MemoryMiB:   mem,
+		CPU:         cpu,
 		State:       state,
 		OperationID: op,
 	}
 }
 
-func refOf(d executor.HostDesc) executor.ProviderRef {
-	return executor.ProviderRef{
+func refWithRequest(d executor.HostDesc, mem, cpu int) executor.ProviderRef {
+	ref := executor.ProviderRef{
 		ProviderID: d.ProviderID,
 		Shape:      d.Shape,
 		MemoryMiB:  d.MemoryMiB,
 		CPU:        d.CPU,
 	}
+	if ref.MemoryMiB <= 0 {
+		ref.MemoryMiB = mem
+	}
+	if ref.CPU == 0 && cpu != 0 {
+		ref.CPU = cpu
+	}
+	return ref
 }

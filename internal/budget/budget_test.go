@@ -49,3 +49,16 @@ func TestExpiredGrant(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestReleasedCannotConfirm(t *testing.T) {
+	l := &Ledger{Grant: Grant{DeploymentUID: "d1", MaxHosts: 1, MaxMemoryMiB: 512}}
+	if err := l.ReserveCreate("op", 128); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Release("op"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Confirm("op"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("err = %v", err)
+	}
+}

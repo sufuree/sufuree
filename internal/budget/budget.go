@@ -138,6 +138,9 @@ func (l *Ledger) set(operationID, state string) error {
 	if r.State == "released" && state == "released" {
 		return nil
 	}
+	if r.State == "released" {
+		return fmt.Errorf("%w: operation %s was released", ErrDenied, operationID)
+	}
 	if r.State == "confirmed" && state == "confirmed" {
 		return nil
 	}
