@@ -123,9 +123,10 @@ sleeping workload once per hint generation, and an unreadable hint defers an
 idle stop at most three times. Without `hint_key_env_key`, wake hints are not
 authenticated: anyone who can write the hint store can forge `busy`, `next_due`
 or `progress` (cost and availability, not data access). With `hint_key_env_key`,
-the agent creates a per-workload HMAC key under `data_dir/hintkeys/` (0600,
-never in the hint store), passes it in each boot env, and accepts only version-2
-envelopes whose MAC verifies for that workload's `hint_prefix`. Unsigned,
+the agent creates a new HMAC key for every boot, kept in the workload's keyring
+`data_dir/hintkeys/<id>.keys` (0600, never in the hint store), passes it in that
+boot's env, and accepts only version-2 envelopes whose MAC verifies for that
+workload's `hint_prefix` with the key of the boot the hint names. Unsigned,
 altered, or older signed hints are refused; the agent keeps the last authentic
 hint (so deleting or replacing `wake.json` cannot suppress a scheduled wake,
 and can end a busy veto only after the same bounded number of unreadable hints
@@ -133,7 +134,19 @@ as any read error) and records it in
 `data_dir/hintkeys/<id>.last` (0600), verified again on restart, so an agent
 restart does not let an older signed hint be replayed. If that record cannot be
 read or written the agent logs it and carries on, and the next restart may accept
-one older hint. There is no key rotation yet.
+one older hint.
+Hint keys rotate at every boot. A hint naming generation `g` verifies only with
+the key of the newest boot at or below `g`, so a key taken from one guest signs
+nothing for a later boot, and restarting a workload replaces its key. The
+earlier boot's key is kept until a hint from a later boot is accepted (a
+sleeping workload's last hint must keep verifying) and is then dropped. Until
+then, whoever holds the earlier key can still sign hints for the earlier boot's
+generations. A keyring holds at most 16 keys: after that many boots in a row
+without an accepted hint, the oldest boot's hints are refused. A single key
+left by an earlier agent (`<id>.key`) is adopted for the generations before the
+first boot and removed from disk. The keyring is host-local, so a workload
+that moves to another host starts a new one there, and the new host can't
+verify the hint the old host's guest left.
 A hint may also report `progress`, an (`epoch`, `seq`) position the workload
 says is durably committed. With `progress_env_key`, the agent keeps the highest
 progress it has read (from every hint read, before each boot, and right after

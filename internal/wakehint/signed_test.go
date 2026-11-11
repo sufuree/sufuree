@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -141,55 +142,6 @@ func TestVerifyingKeepsTheLastAuthenticHint(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateKey(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "hintkeys")
-	k1, err := LoadOrCreateKey(dir, "w1")
-	if err != nil || len(k1) != KeySize {
-		t.Fatalf("create: %d bytes, %v", len(k1), err)
-	}
-	st, err := os.Stat(filepath.Join(dir, "w1.key"))
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("key file mode %v, %v", st.Mode(), err)
-	}
-	if d, _ := os.Stat(dir); d.Mode().Perm() != 0o700 {
-		t.Fatalf("key dir mode %v", d.Mode())
-	}
-	k2, err := LoadOrCreateKey(dir, "w1")
-	if err != nil || string(k1) != string(k2) {
-		t.Fatal("the key changed on reload")
-	}
-	if k3, _ := LoadOrCreateKey(dir, "w2"); string(k3) == string(k1) {
-		t.Fatal("two workloads share a key")
-	}
-	p := filepath.Join(dir, "w1.key")
-	if err := os.Chmod(p, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreateKey(dir, "w1"); err == nil {
-		t.Fatal("a group/world-readable key was accepted")
-	}
-	_ = os.Chmod(p, 0o600)
-	if err := os.WriteFile(filepath.Join(dir, "w3.key"), []byte("short"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreateKey(dir, "w3"); err == nil {
-		t.Fatal("a short key was accepted")
-	}
-	if err := os.Symlink(p, filepath.Join(dir, "w4.key")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreateKey(dir, "w4"); err == nil {
-		t.Fatal("a symlinked key was accepted")
-	}
-	// A crash mid-creation leaves only a temporary file, never a partial key.
-	if err := os.WriteFile(filepath.Join(dir, ".w5.key-123"), []byte("par"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if k, err := LoadOrCreateKey(dir, "w5"); err != nil || len(k) != KeySize {
-		t.Fatalf("after an interrupted creation: %d bytes, %v", len(k), err)
-	}
-}
-
 // TestVerifyingRecordSurvivesRestart: with Record set, an agent restart
 // keeps the newest accepted hint, so an older signed hint replayed after
 // the restart is refused and a deleted hint falls back to the recorded one.
@@ -295,5 +247,193 @@ func TestVerifyingRecordWriteFailureKeepsHints(t *testing.T) {
 	}
 	if len(recErrs) != 1 {
 		t.Fatalf("record errors = %d, want 1", len(recErrs))
+	}
+}
+
+func hintAt(gen, seq uint64) string {
+	return `{"version":2,"generation":` + strconv.FormatUint(gen, 10) + `,"busy":false,"updated_at":"2026-11-09T00:00:00Z","seq":` + strconv.FormatUint(seq, 10) + `}`
+}
+
+func TestKeyringFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hintkeys")
+	r, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.For(1) != nil {
+		t.Fatal("an empty keyring has a key")
+	}
+	k5, err := r.ForBoot(5)
+	if err != nil || len(k5) != KeySize {
+		t.Fatalf("ForBoot: %d bytes, %v", len(k5), err)
+	}
+	k9, err := r.ForBoot(9)
+	if err != nil || string(k9) == string(k5) {
+		t.Fatalf("the second boot's key: %v, same=%v", err, string(k9) == string(k5))
+	}
+	for _, g := range []uint64{0, 5, 9} {
+		if _, err := r.ForBoot(g); err == nil {
+			t.Fatalf("ForBoot(%d) accepted a generation not above the newest boot", g)
+		}
+	}
+	for g, want := range map[uint64][]byte{4: nil, 5: k5, 8: k5, 9: k9, 100: k9} {
+		if got := r.For(g); string(got) != string(want) {
+			t.Errorf("For(%d) is the wrong key", g)
+		}
+	}
+	p := filepath.Join(dir, "w1.keys")
+	if st, err := os.Stat(p); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("keyring file mode: %v", err)
+	}
+	if d, _ := os.Stat(dir); d.Mode().Perm() != 0o700 {
+		t.Fatalf("key dir mode %v", d.Mode())
+	}
+	// A restarted agent has the same keys.
+	r2, err := OpenKeyring(dir, "w1")
+	if err != nil || string(r2.For(5)) != string(k5) || string(r2.For(9)) != string(k9) {
+		t.Fatalf("reopened keyring differs: %v", err)
+	}
+	// An accepted hint from the newer boot drops the older key, durably.
+	r2.Accepted(9)
+	if r2.For(5) != nil || string(r2.For(9)) != string(k9) {
+		t.Fatal("Accepted(9) did not drop exactly the older key")
+	}
+	if r3, err := OpenKeyring(dir, "w1"); err != nil || r3.For(5) != nil || string(r3.For(9)) != string(k9) {
+		t.Fatalf("the dropped key came back after a restart: %v", err)
+	}
+	if other, _ := OpenKeyring(dir, "w2"); other.For(9) != nil {
+		t.Fatal("two workloads share a keyring")
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenKeyring(dir, "w1"); err == nil {
+		t.Fatal("a group/world-readable keyring was accepted")
+	}
+	for name, body := range map[string]string{
+		"junk": "x", "version": `{"version":2,"keys":[]}`, "short key": `{"version":1,"keys":[{"generation":1,"key":"00"}]}`,
+		"order": `{"version":1,"keys":[{"generation":2,"key":"` + hex.EncodeToString(k5) + `"},{"generation":2,"key":"` + hex.EncodeToString(k9) + `"}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "bad.keys"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenKeyring(dir, "bad"); err == nil {
+			t.Errorf("a keyring with %s was accepted", name)
+		}
+	}
+}
+
+// TestKeyringIsBounded: boots that never publish a hint don't grow the
+// keyring without limit.
+func TestKeyringIsBounded(t *testing.T) {
+	r := NewKeyring()
+	for g := uint64(1); g <= maxRingKeys+4; g++ {
+		if _, err := r.ForBoot(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.For(4) != nil || r.For(5) == nil {
+		t.Fatalf("the keyring kept more or fewer than %d keys", maxRingKeys)
+	}
+}
+
+// TestKeyringAdoptsTheSingleKey: a key from before rotation still verifies
+// the sleeping workload's last hint, and is gone from disk once the keyring
+// is saved.
+func TestKeyringAdoptsTheSingleKey(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "w1.key")
+	if err := os.WriteFile(old, testKey(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(r.For(7)) != string(testKey()) {
+		t.Fatal("the single key does not cover the generations before the first boot")
+	}
+	k8, err := r.ForBoot(8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(r.For(7)) != string(testKey()) || string(r.For(8)) != string(k8) {
+		t.Fatal("the first boot's key replaced, or did not follow, the single key")
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("the single key file is still on disk: %v", err)
+	}
+	if r2, err := OpenKeyring(dir, "w1"); err != nil || string(r2.For(7)) != string(testKey()) {
+		t.Fatalf("the adopted key was lost on reopen: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "w2.key"), []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenKeyring(dir, "w2"); err == nil {
+		t.Fatal("a short single key was adopted")
+	}
+}
+
+// TestVerifyingRotatesKeysByBoot: a hint verifies only with the key of the
+// boot it names, so a key taken from one boot signs nothing for a later
+// one, and the earlier boot's last hint keeps verifying until the later
+// boot publishes.
+func TestVerifyingRotatesKeysByBoot(t *testing.T) {
+	ctx, p := context.Background(), "inst/w1"
+	dir := t.TempDir()
+	ring, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &rawStore{}
+	v := &Verifying{Source: src, Keys: ring, Record: filepath.Join(dir, "w1.last")}
+	k5, _ := ring.ForBoot(5)
+	src.data = sign(k5, p, hintAt(5, 3))
+	if h, ok, err := v.Read(ctx, p); err != nil || !ok || h.Generation != 5 {
+		t.Fatalf("the first boot's hint: %+v, %v, %v", h, ok, err)
+	}
+	// The next boot has its key; the sleeping guest's last hint still verifies.
+	k6, _ := ring.ForBoot(6)
+	if h, ok, err := v.Read(ctx, p); err != nil || !ok || h.Seq != 3 {
+		t.Fatalf("the earlier boot's hint after the next boot's key was issued: %+v, %v, %v", h, ok, err)
+	}
+	// The earlier boot's key can't sign for the later boot, at any seq.
+	src.data = sign(k5, p, hintAt(6, 99))
+	if h, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) || h.Generation != 5 {
+		t.Fatalf("a hint for boot 6 signed with boot 5's key: %+v, %v", h, err)
+	}
+	src.data = sign(k5, p, hintAt(7, 1))
+	if _, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("a hint for an unissued generation signed with boot 5's key: %v", err)
+	}
+	// Nor can the later boot's key rewrite the earlier boot's hints.
+	src.data = sign(k6, p, hintAt(5, 99))
+	if _, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("a hint for boot 5 signed with boot 6's key: %v", err)
+	}
+	// Once the later boot publishes, the earlier key is dropped.
+	src.data = sign(k6, p, hintAt(6, 1))
+	if h, ok, err := v.Read(ctx, p); err != nil || !ok || h.Generation != 6 {
+		t.Fatalf("the later boot's hint: %+v, %v, %v", h, ok, err)
+	}
+	if ring.For(5) != nil {
+		t.Fatal("the earlier boot's key was kept after the later boot's hint was accepted")
+	}
+	src.data = sign(k5, p, hintAt(5, 100))
+	if h, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) || h.Generation != 6 {
+		t.Fatalf("the earlier boot's key after it was dropped: %+v, %v", h, err)
+	}
+	// A restarted agent reloads the keyring and the record, and still
+	// refuses the earlier boot's key.
+	ring2, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := &Verifying{Source: src, Keys: ring2, Record: filepath.Join(dir, "w1.last")}
+	if h, ok, err := v2.Read(ctx, p); !errors.Is(err, ErrFallback) || !ok || h.Generation != 6 {
+		t.Fatalf("after a restart: %+v, %v, %v", h, ok, err)
+	}
+	if _, _, err := (&Verifying{Source: src, Keys: NewKeyring()}).Read(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("an empty keyring read a hint: %v", err)
 	}
 }

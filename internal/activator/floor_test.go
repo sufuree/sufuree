@@ -223,7 +223,7 @@ func TestBootSendsTheVerifiedHintGeneration(t *testing.T) {
 	l, h := &fakeLauncher{}, &fakeHints{}
 	f := &fakeFloor{inc: 1}
 	a, _ := newFloorAct(t, l, h, f)
-	a.opt.HintKey = make([]byte, wakehint.KeySize)
+	a.opt.HintKeys = wakehint.NewKeyring()
 	a.spec.HintKeyEnvKey = "HK"
 	h.set(wakehint.Hint{Version: 2, Generation: 33, Seq: 1})
 	if _, _, err := wakeAndStop(t, a, l); err != nil {

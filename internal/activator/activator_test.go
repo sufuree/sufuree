@@ -603,38 +603,43 @@ func TestProgressIsRecordedAfterACrashAndKeptWhenTheHintIsUnreadable(t *testing.
 	}
 }
 
-func TestHintKeyReachesEveryBoot(t *testing.T) {
-	key := make([]byte, wakehint.KeySize)
-	for i := range key {
-		key[i] = byte(i + 1)
-	}
+func TestEveryBootGetsItsOwnHintKey(t *testing.T) {
 	w := spec()
 	w.HintKeyEnvKey = "HINTKEY"
-	newAct := func(k []byte) (*Activator, *fakeLauncher) {
+	newAct := func(k HintKeyIssuer) (*Activator, *fakeLauncher) {
 		j, err := journal.Open(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
 		l := &fakeLauncher{}
 		a := New(w, j, l, nil, Options{
-			Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond, Attempts: 1, HintKey: k,
+			Tick: time.Hour, HintPoll: time.Hour, StopGrace: 10 * time.Millisecond, Attempts: 1, HintKeys: k,
 			Getenv: func(k string) (string, bool) { return "s3cret", k == "TEST_SECRET" },
 			Ready:  func(context.Context, string) error { return nil },
 		})
 		run(t, a)
 		return a, l
 	}
-	a, l := newAct(key)
-	_, release, err := a.Acquire(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	ring := wakehint.NewKeyring()
+	a, l := newAct(ring)
+	for range 2 {
+		if _, _, err := wakeAndStop(t, a, l); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "asleep", func() bool { st, _, _, _ := a.Snapshot(); return st == Asleep })
 	}
-	release()
 	l.mu.Lock()
-	got := l.envs[0]["HINTKEY"]
+	first, second := l.envs[0]["HINTKEY"], l.envs[1]["HINTKEY"]
+	gens := []uint64{l.boots[0], l.boots[1]}
 	l.mu.Unlock()
-	if got != hex.EncodeToString(key) {
-		t.Fatalf("boot env hint key %q", got)
+	if first == second || len(first) != 2*wakehint.KeySize {
+		t.Fatalf("two boots got hint keys %q and %q", first, second)
+	}
+	// Each boot's key is the one the host verifies that generation with.
+	for i, want := range []string{first, second} {
+		if got := hex.EncodeToString(ring.For(gens[i])); got != want {
+			t.Fatalf("generation %d verifies with another key than its boot got", gens[i])
+		}
 	}
 	a, l = newAct(nil)
 	if _, _, err := a.Acquire(context.Background()); err == nil {
