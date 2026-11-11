@@ -36,6 +36,11 @@ const StoreCAPurpose = "sufuree-store-ca"
 // authenticates. SeaweedFS admits gRPC peers by this name
 // (allowed_commonNames, a comma-separated list), so it carries no comma,
 // space or dot.
+// hostnamePattern is a DNS name: dot-separated labels of letters, digits
+// and inner hyphens. A name that isn't one, such as one with a space, is
+// refused rather than issued as a SAN no client would match.
+var hostnamePattern = regexp.MustCompile(`^(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.(?i:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?))*$`)
+
 var storeNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // InitStoreCA creates a new store CA in dir, as InitCAWrapped does a
@@ -85,15 +90,17 @@ func (ca *CA) IssueStore(name string, validFor time.Duration, serverNames []stri
 	if len(serverNames) > 0 {
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 		for _, n := range serverNames {
-			if n == "" {
-				return Issued{}, errors.New("controlauth: an empty server name")
-			}
 			if ip := net.ParseIP(n); ip != nil {
 				tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
-			} else {
+			} else if hostnamePattern.MatchString(n) && len(n) <= 253 {
 				tmpl.DNSNames = append(tmpl.DNSNames, n)
+			} else {
+				return Issued{}, fmt.Errorf("controlauth: server name %q is neither an IP address nor a hostname", n)
 			}
 		}
+	}
+	if !ca.Cert.NotAfter.After(now.Add(time.Hour)) {
+		return Issued{}, fmt.Errorf("controlauth: the store CA expires %s; replace it before issuing", ca.Cert.NotAfter.UTC().Format(time.RFC3339))
 	}
 	if tmpl.NotAfter.After(ca.Cert.NotAfter) {
 		tmpl.NotAfter = ca.Cert.NotAfter

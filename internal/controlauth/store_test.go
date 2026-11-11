@@ -152,4 +152,45 @@ func TestStoreAndControlCAsAreSeparate(t *testing.T) {
 	if wrapContext(storeKind, []byte("x"))["purpose"] != StoreCAPurpose || wrapContext(controlKind, []byte("x"))["purpose"] != "sufuree-control-ca" {
 		t.Fatal("the KMS purposes changed; the key policies name them")
 	}
+	// With the CN check out of the way, the KMS context alone refuses a
+	// key wrapped for one kind when unwrapped for the other, both ways.
+	cert := []byte("same certificate")
+	for _, k := range []struct{ from, to caKind }{{storeKind, controlKind}, {controlKind, storeKind}} {
+		ct, _, err := kms.Wrap(ctx, []byte("ca key"), wrapContext(k.from, cert))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := kms.Unwrap(ctx, ct, wrapContext(k.to, cert)); err == nil {
+			t.Errorf("a %s key unwrapped as a %s key", k.from.purpose, k.to.purpose)
+		}
+		if _, err := kms.Unwrap(ctx, ct, wrapContext(k.from, cert)); err != nil {
+			t.Errorf("a %s key didn't unwrap as itself: %v", k.from.purpose, err)
+		}
+	}
+}
+
+func TestIssueStoreRefusesBadServerNamesAndAnExpiringCA(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "store")
+	if err := InitStoreCA(ctx, dir, 24*time.Hour, nil); err != nil {
+		t.Fatal(err)
+	}
+	ca, err := LoadStoreCA(ctx, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"", " filer.internal", "10.0.0.5 ", "a b", "http://x/", "-x.internal", "x..internal", "x_y"} {
+		if _, err := ca.IssueStore("filer", time.Hour, []string{n}); err == nil {
+			t.Errorf("server name %q was issued", n)
+		}
+	}
+	for _, n := range []string{"filer", "Filer.Internal", "seaweed-1.zati.internal", "10.0.0.5", "::1"} {
+		if _, err := ca.IssueStore("filer", time.Hour, []string{n}); err != nil {
+			t.Errorf("server name %q: %v", n, err)
+		}
+	}
+	ca.Cert.NotAfter = time.Now().Add(30 * time.Minute)
+	if _, err := ca.IssueStore("filer", time.Hour, nil); err == nil {
+		t.Error("a CA expiring within the hour issued a certificate")
+	}
 }

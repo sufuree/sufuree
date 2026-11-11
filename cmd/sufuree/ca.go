@@ -126,8 +126,14 @@ func runStoreCA(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *dir == "" || *days <= 0 {
+		if *dir == "" {
 			return errors.New("--dir is required")
+		}
+		if *days <= 0 {
+			return errors.New("--days must be positive")
+		}
+		if fs.NArg() > 0 {
+			return fmt.Errorf("unexpected arguments %q", fs.Args())
 		}
 		var w controlauth.KeyWrapper
 		if *kmsKey != "" {
@@ -135,6 +141,8 @@ func runStoreCA(args []string) error {
 			if w, err = kmsWrapper(ctx, *kmsKey); err != nil {
 				return err
 			}
+		} else {
+			fmt.Fprintln(os.Stderr, "warning: without --kms-key-id the CA key is a plain file (ca.key); development only, never for PHI")
 		}
 		if err := controlauth.InitStoreCA(ctx, *dir, time.Duration(*days)*24*time.Hour, w); err != nil {
 			return err
@@ -154,6 +162,9 @@ func runStoreCA(args []string) error {
 		if *dir == "" || *name == "" || *out == "" {
 			return errors.New("--dir, --name and --out are required")
 		}
+		if fs.NArg() > 0 {
+			return fmt.Errorf("unexpected arguments %q", fs.Args())
+		}
 		var w controlauth.KeyWrapper
 		if controlauth.Wrapped(*dir) {
 			id, err := controlauth.WrappedKeyID(*dir)
@@ -170,7 +181,9 @@ func runStoreCA(args []string) error {
 		}
 		var names []string
 		if *servers != "" {
-			names = strings.Split(*servers, ",")
+			for _, n := range strings.Split(*servers, ",") {
+				names = append(names, strings.TrimSpace(n))
+			}
 		}
 		is, err := ca.IssueStore(*name, time.Duration(*days)*24*time.Hour, names)
 		if err != nil {

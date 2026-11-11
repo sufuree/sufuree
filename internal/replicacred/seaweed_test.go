@@ -126,6 +126,9 @@ func TestSeaweedFS(t *testing.T) {
 	if c := code(put(ca, HintPrefix(b)+"/wake.json", false)); c != "AccessDenied" {
 		t.Errorf("a writes b's hint: %s, want AccessDenied", c)
 	}
+	if c := code(put(ca, HintPrefix(a)+"x/wake.json", false)); c != "AccessDenied" {
+		t.Errorf("a writes a neighboring hint prefix: %s, want AccessDenied", c)
+	}
 	if c := code(get(ca, hint)); c != "AccessDenied" {
 		t.Errorf("a reads its hint back: %s, want AccessDenied", c)
 	}
