@@ -15,9 +15,10 @@ import (
 // Hint keys rotate at every boot.
 //
 // A Keyring holds one workload's hint keys on the host. Every boot gets a
-// new key, bound to that boot's generation: a hint naming generation g is
-// verified with the key of the newest boot at or below g. A key taken from
-// one guest therefore signs nothing for a later boot, and restarting a
+// new key, bound to that boot's generation: a hint verifies only with the
+// key of the boot whose generation it names, so a guest must name its boot
+// generation in every signed hint. A key taken from one guest therefore
+// signs nothing for any other boot, issued or not, and restarting a
 // workload replaces its key.
 //
 // Older keys are kept only while a hint they signed can still be the
@@ -25,29 +26,46 @@ import (
 // stale whatever their MAC, and their keys are dropped.
 
 // maxRingKeys bounds a keyring whose boots never publish a hint (boots that
-// keep failing). The oldest keys go first; a hint they signed is then
-// refused as unauthenticated.
+// keep failing). The key of the last accepted hint is always kept; of the
+// others the oldest go first, and a hint they signed is then refused as
+// unauthenticated.
 const maxRingKeys = 16
 
 // Keyring is one workload's hint keys. Its methods are safe for concurrent
 // use.
 type Keyring struct {
 	path string // "" keeps the keys in memory only
+	// OnSaveError, when set, is told when dropping keys could not be saved
+	// (for logging). The keys are gone from memory; a restart before a
+	// later save brings them back. Set it before the keyring is used.
+	OnSaveError func(error)
 
-	mu     sync.Mutex
-	keys   []ringKey // ascending by generation
-	legacy string    // a pre-rotation key file to remove once the ring is saved
+	mu       sync.Mutex
+	keys     []ringKey // ascending by generation; a legacy key is first
+	accepted uint64    // generation of the newest accepted hint
+	seen     bool      // a hint has been accepted
+	legacy   string    // a pre-rotation key file to remove once the ring is saved
 }
 
 type ringKey struct {
 	Generation uint64 `json:"generation"`
 	Key        string `json:"key"` // hex
-	raw        []byte
+	// Legacy marks the single key from before rotation. It covers every
+	// generation below the first boot under the keyring (generation 0).
+	Legacy bool `json:"legacy,omitempty"`
+	// Below, on the legacy key, is the first boot's generation, fixed when
+	// that boot's key is created: the legacy key covers only generations
+	// below it, whatever keys are dropped later. 0 means no boot yet.
+	Below uint64 `json:"below,omitempty"`
+	raw   []byte
 }
 
 type ringFile struct {
 	Version int       `json:"version"`
 	Keys    []ringKey `json:"keys"`
+	// Accepted is the generation of the newest accepted hint, whose key is
+	// never evicted.
+	Accepted *uint64 `json:"accepted,omitempty"`
 }
 
 // maxRingFile bounds the keyring file read at start.
@@ -60,9 +78,10 @@ func NewKeyring() *Keyring { return &Keyring{} }
 // OpenKeyring loads workload id's keyring from dir (0700), or starts an
 // empty one. The file is dir/<id>.keys, mode 0600; keys never leave the
 // host except in that workload's boot env. A single key left by an agent
-// from before rotation (dir/<id>.key) is adopted for the generations before
-// the first boot under this keyring, so the hint a sleeping workload last
-// published still verifies.
+// from before rotation (dir/<id>.key) is adopted, when the keyring is new,
+// for the generations before the first boot under this keyring, so the hint
+// a sleeping workload last published still verifies. Until that first boot
+// it verifies a hint naming any generation, as it did before rotation.
 func OpenKeyring(dir, id string) (*Keyring, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -86,21 +105,31 @@ func OpenKeyring(dir, id string) (*Keyring, error) {
 			if i > 0 && f.Keys[i].Generation <= f.Keys[i-1].Generation {
 				return nil, fmt.Errorf("hint keyring %s is not in generation order", k.path)
 			}
+			if f.Keys[i].Legacy != (i == 0 && f.Keys[i].Generation == 0) || (!f.Keys[i].Legacy && f.Keys[i].Below != 0) {
+				return nil, fmt.Errorf("hint keyring %s has a key at generation %d that is not a boot's", k.path, f.Keys[i].Generation)
+			}
 			f.Keys[i].raw = raw
 		}
 		k.keys = f.Keys
+		if f.Accepted != nil {
+			k.accepted, k.seen = *f.Accepted, true
+		}
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	}
-	// A leftover single key is adopted when the keyring is new, and removed
-	// in any case once the keyring is saved.
+	// A leftover single key is adopted when the keyring is new. Beside an
+	// existing keyring it is only removed, unread, at the next save.
 	legacy := filepath.Join(dir, id+".key")
+	if len(k.keys) > 0 || k.seen {
+		if _, err := os.Lstat(legacy); err == nil {
+			k.legacy = legacy
+		}
+		return k, nil
+	}
 	switch raw, err := readKey(legacy); {
 	case err == nil:
 		k.legacy = legacy
-		if len(k.keys) == 0 {
-			k.keys = []ringKey{{Generation: 0, Key: hex.EncodeToString(raw), raw: raw}}
-		}
+		k.keys = []ringKey{{Key: hex.EncodeToString(raw), Legacy: true, raw: raw}}
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	}
@@ -124,8 +153,17 @@ func (k *Keyring) ForBoot(generation uint64) ([]byte, error) {
 		return nil, err
 	}
 	keys := append(append([]ringKey(nil), k.keys...), ringKey{Generation: generation, Key: hex.EncodeToString(raw), raw: raw})
-	if len(keys) > maxRingKeys {
-		keys = keys[len(keys)-maxRingKeys:]
+	if keys[0].Legacy && keys[0].Below == 0 {
+		keys[0].Below = generation
+	}
+	// Over the bound, the oldest key goes, except the one that verifies
+	// the last accepted hint: the host still falls back to that hint.
+	for len(keys) > maxRingKeys {
+		drop := 0
+		if k.seen && drop == indexFor(keys, k.accepted) {
+			drop = 1
+		}
+		keys = append(keys[:drop:drop], keys[drop+1:]...)
 	}
 	if err := k.save(keys); err != nil {
 		return nil, fmt.Errorf("wakehint: saving the hint keyring: %w", err)
@@ -135,36 +173,47 @@ func (k *Keyring) ForBoot(generation uint64) ([]byte, error) {
 }
 
 // For returns the key that signs hints naming generation: the key of the
-// newest boot at or below it, or nil when there is none.
+// boot at exactly that generation, or nil when the keyring has none. The
+// single key from before rotation covers the generations below the first
+// boot.
 func (k *Keyring) For(generation uint64) []byte {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if i := k.covering(generation); i >= 0 {
+	if i := indexFor(k.keys, generation); i >= 0 {
 		return k.keys[i].raw
 	}
 	return nil
 }
 
 // Accepted notes that a hint naming generation was accepted. Keys of
-// earlier boots are dropped: any hint they signed is now stale. A failed
-// save is retried by the next change; the keys are gone from memory at
-// once.
+// earlier boots are dropped: any hint they signed is now stale. If that
+// cannot be saved, OnSaveError is told and the next save retries it; the
+// keys are gone from memory at once.
 func (k *Keyring) Accepted(generation uint64) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	i := k.covering(generation)
-	if i <= 0 {
+	i := indexFor(k.keys, generation)
+	if i < 0 || (k.seen && k.accepted == generation) {
 		return
 	}
 	k.keys = append([]ringKey(nil), k.keys[i:]...)
-	_ = k.save(k.keys)
+	k.accepted, k.seen = generation, true
+	if err := k.save(k.keys); err != nil && k.OnSaveError != nil {
+		k.OnSaveError(fmt.Errorf("hint keyring %s: %w", k.path, err))
+	}
 }
 
-// covering returns the index of the newest key at or below generation, or
-// -1. k.mu must be held.
-func (k *Keyring) covering(generation uint64) int {
-	for i := len(k.keys) - 1; i >= 0; i-- {
-		if k.keys[i].Generation <= generation {
+// indexFor returns the index in keys of the key for generation, or -1: a
+// boot's key at exactly that generation, or the legacy key for a
+// generation below the first boot (any generation while there is no boot).
+func indexFor(keys []ringKey, generation uint64) int {
+	for i := len(keys) - 1; i >= 0; i-- {
+		switch {
+		case keys[i].Legacy:
+			if keys[i].Below == 0 || generation < keys[i].Below {
+				return i
+			}
+		case keys[i].Generation == generation:
 			return i
 		}
 	}
@@ -177,7 +226,11 @@ func (k *Keyring) save(keys []ringKey) error {
 	if k.path == "" {
 		return nil
 	}
-	data, err := json.Marshal(ringFile{Version: 1, Keys: keys})
+	f := ringFile{Version: 1, Keys: keys}
+	if k.seen {
+		f.Accepted = &k.accepted
+	}
+	data, err := json.Marshal(f)
 	if err != nil {
 		return err
 	}

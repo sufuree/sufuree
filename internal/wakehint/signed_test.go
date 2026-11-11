@@ -276,7 +276,7 @@ func TestKeyringFile(t *testing.T) {
 			t.Fatalf("ForBoot(%d) accepted a generation not above the newest boot", g)
 		}
 	}
-	for g, want := range map[uint64][]byte{4: nil, 5: k5, 8: k5, 9: k9, 100: k9} {
+	for g, want := range map[uint64][]byte{0: nil, 4: nil, 5: k5, 6: nil, 8: nil, 9: k9, 10: nil, 100: nil} {
 		if got := r.For(g); string(got) != string(want) {
 			t.Errorf("For(%d) is the wrong key", g)
 		}
@@ -312,7 +312,8 @@ func TestKeyringFile(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"junk": "x", "version": `{"version":2,"keys":[]}`, "short key": `{"version":1,"keys":[{"generation":1,"key":"00"}]}`,
-		"order": `{"version":1,"keys":[{"generation":2,"key":"` + hex.EncodeToString(k5) + `"},{"generation":2,"key":"` + hex.EncodeToString(k9) + `"}]}`,
+		"a boot at generation 0": `{"version":1,"keys":[{"generation":0,"key":"` + hex.EncodeToString(k5) + `"}]}`,
+		"order":                  `{"version":1,"keys":[{"generation":2,"key":"` + hex.EncodeToString(k5) + `"},{"generation":2,"key":"` + hex.EncodeToString(k9) + `"}]}`,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, "bad.keys"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -324,16 +325,43 @@ func TestKeyringFile(t *testing.T) {
 }
 
 // TestKeyringIsBounded: boots that never publish a hint don't grow the
-// keyring without limit.
+// keyring without limit, and never cost the key of the last accepted hint.
 func TestKeyringIsBounded(t *testing.T) {
-	r := NewKeyring()
-	for g := uint64(1); g <= maxRingKeys+4; g++ {
+	ctx, p := context.Background(), "inst/w1"
+	dir := t.TempDir()
+	r, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(dir, "w1.last")
+	k5, _ := r.ForBoot(5)
+	src := &rawStore{data: sign(k5, p, hintAt(5, 3))}
+	if _, ok, err := (&Verifying{Source: src, Keys: r, Record: record}).Read(ctx, p); err != nil || !ok {
+		t.Fatalf("the accepted hint: %v, %v", ok, err)
+	}
+	for g := uint64(6); g < 6+maxRingKeys+4; g++ { // boots that publish nothing
 		if _, err := r.ForBoot(g); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if r.For(4) != nil || r.For(5) == nil {
-		t.Fatalf("the keyring kept more or fewer than %d keys", maxRingKeys)
+	// A restarted agent has the bounded keyring, with the accepted hint's
+	// key, and still falls back to that hint when the stored one is gone.
+	r2, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for g := uint64(5); g < 6+maxRingKeys+4; g++ {
+		if r2.For(g) != nil {
+			n++
+		}
+	}
+	if n != maxRingKeys || string(r2.For(5)) != string(k5) || r2.For(6) != nil || r2.For(6+maxRingKeys+3) == nil {
+		t.Fatalf("the keyring kept %d keys (want %d), or dropped the accepted hint's or the newest", n, maxRingKeys)
+	}
+	h, ok, err := (&Verifying{Source: &rawStore{data: []byte("gone")}, Keys: r2, Record: record}).Read(ctx, p)
+	if !errors.Is(err, ErrFallback) || !ok || h.Generation != 5 || h.Seq != 3 {
+		t.Fatalf("after a restart the last authentic hint: %+v, %v, %v", h, ok, err)
 	}
 }
 
@@ -357,8 +385,19 @@ func TestKeyringAdoptsTheSingleKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(r.For(7)) != string(testKey()) || string(r.For(8)) != string(k8) {
+	if string(r.For(7)) != string(testKey()) || string(r.For(8)) != string(k8) || r.For(9) != nil {
 		t.Fatal("the first boot's key replaced, or did not follow, the single key")
+	}
+	// The single key never covers a boot's generation, even one whose key
+	// was dropped while the single key's hint is still the accepted one.
+	r.Accepted(7)
+	for g := uint64(9); g < 9+maxRingKeys+2; g++ {
+		if _, err := r.ForBoot(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if string(r.For(7)) != string(testKey()) || r.For(8) != nil || r.For(9) != nil {
+		t.Fatal("after boots were dropped the single key covers a boot's generation, or was dropped")
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatalf("the single key file is still on disk: %v", err)
@@ -371,6 +410,21 @@ func TestKeyringAdoptsTheSingleKey(t *testing.T) {
 	}
 	if _, err := OpenKeyring(dir, "w2"); err == nil {
 		t.Fatal("a short single key was adopted")
+	}
+	// Beside an existing keyring a leftover single key is not read, only
+	// removed at the next save.
+	if err := os.WriteFile(old, []byte("short"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r3, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatalf("a leftover single key beside a keyring stopped the agent: %v", err)
+	}
+	if _, err := r3.ForBoot(100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("the leftover single key is still on disk: %v", err)
 	}
 }
 
@@ -392,6 +446,15 @@ func TestVerifyingRotatesKeysByBoot(t *testing.T) {
 	if h, ok, err := v.Read(ctx, p); err != nil || !ok || h.Generation != 5 {
 		t.Fatalf("the first boot's hint: %+v, %v, %v", h, ok, err)
 	}
+	// Boot 5's key signs nothing for a generation no boot has yet, so it
+	// can't get ahead of the next boot's hints.
+	for _, g := range []uint64{6, 1000, 1 << 63} {
+		src.data = sign(k5, p, hintAt(g, 1))
+		if h, _, err := v.Read(ctx, p); !errors.Is(err, ErrUnauthenticated) || h.Generation != 5 {
+			t.Fatalf("a hint for generation %d signed with boot 5's key, before any later boot: %+v, %v", g, h, err)
+		}
+	}
+	src.data = sign(k5, p, hintAt(5, 3))
 	// The next boot has its key; the sleeping guest's last hint still verifies.
 	k6, _ := ring.ForBoot(6)
 	if h, ok, err := v.Read(ctx, p); err != nil || !ok || h.Seq != 3 {
@@ -435,5 +498,34 @@ func TestVerifyingRotatesKeysByBoot(t *testing.T) {
 	}
 	if _, _, err := (&Verifying{Source: src, Keys: NewKeyring()}).Read(ctx, p); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("an empty keyring read a hint: %v", err)
+	}
+}
+
+// TestKeyringReportsAFailedDrop: when dropping keys can't be saved, the
+// caller is told, and the keys are gone from memory all the same.
+func TestKeyringReportsAFailedDrop(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes to a read-only directory")
+	}
+	dir := t.TempDir()
+	r, err := OpenKeyring(dir, "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errs []error
+	r.OnSaveError = func(err error) { errs = append(errs, err) }
+	if _, err := r.ForBoot(5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ForBoot(6); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	r.Accepted(6)
+	if len(errs) != 1 || r.For(5) != nil || r.For(6) == nil {
+		t.Fatalf("a failed drop: %d errors reported, key 5 kept=%v", len(errs), r.For(5) != nil)
 	}
 }
