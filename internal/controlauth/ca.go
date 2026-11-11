@@ -113,11 +113,26 @@ const (
 	caKeyFile  = "ca.key"
 )
 
-// CA is a loaded controller CA.
+// caKind separates the CAs this package keeps. A CA of one kind is never
+// loaded as, or issues certificates of, the other: the kind is its
+// certificate's common name and its wrapped key's KMS purpose.
+type caKind struct {
+	commonName string
+	purpose    string
+}
+
+var (
+	controlKind = caKind{commonName: "sufuree control CA", purpose: "sufuree-control-ca"}
+	// storeKind is the object store's CA (store.go).
+	storeKind = caKind{commonName: "sufuree store CA", purpose: StoreCAPurpose}
+)
+
+// CA is a loaded CA: the controller CA, or the object store's (store.go).
 type CA struct {
 	Cert *x509.Certificate
 	Key  crypto.Signer
 	PEM  []byte
+	kind caKind
 }
 
 // InitCA creates a new CA in dir (0700) with its key in a local 0600 file
@@ -130,6 +145,10 @@ func InitCA(dir string, validFor time.Duration) error {
 // only encrypted (ca.key.kms), bound to the CA certificate; it never
 // touches the disk in plaintext.
 func InitCAWrapped(ctx context.Context, dir string, validFor time.Duration, w KeyWrapper) error {
+	return initCA(ctx, dir, validFor, w, controlKind)
+}
+
+func initCA(ctx context.Context, dir string, validFor time.Duration, w KeyWrapper, kind caKind) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -154,7 +173,7 @@ func InitCAWrapped(ctx context.Context, dir string, validFor time.Duration, w Ke
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "sufuree control CA"},
+		Subject:               pkix.Name{CommonName: kind.commonName},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(validFor),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -181,7 +200,7 @@ func InitCAWrapped(ctx context.Context, dir string, validFor time.Duration, w Ke
 	if w == nil {
 		return writeExclusive(filepath.Join(dir, caKeyFile), keyPEM, 0o600)
 	}
-	ct, keyID, err := w.Wrap(ctx, keyPEM, wrapContext(der))
+	ct, keyID, err := w.Wrap(ctx, keyPEM, wrapContext(kind, der))
 	if err != nil {
 		return err
 	}
@@ -208,6 +227,10 @@ func Wrapped(dir string) bool {
 // wrapped key needs w; a plaintext key is refused when w is set, so a
 // custody downgrade is not silent. The key must match the certificate.
 func LoadCAWrapped(ctx context.Context, dir string, w KeyWrapper) (*CA, error) {
+	return loadCA(ctx, dir, w, controlKind)
+}
+
+func loadCA(ctx context.Context, dir string, w KeyWrapper, kind caKind) (*CA, error) {
 	certPEM, err := os.ReadFile(filepath.Join(dir, caCertFile))
 	if err != nil {
 		return nil, err
@@ -215,6 +238,9 @@ func LoadCAWrapped(ctx context.Context, dir string, w KeyWrapper) (*CA, error) {
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		return nil, err
+	}
+	if cert.Subject.CommonName != kind.commonName {
+		return nil, fmt.Errorf("controlauth: %s holds %q, not the %s", dir, cert.Subject.CommonName, kind.commonName)
 	}
 	var keyPEM []byte
 	if Wrapped(dir) {
@@ -229,7 +255,7 @@ func LoadCAWrapped(ctx context.Context, dir string, w KeyWrapper) (*CA, error) {
 		if err != nil {
 			return nil, err
 		}
-		if keyPEM, err = w.Unwrap(ctx, wk.Ciphertext, wrapContext(cert.Raw)); err != nil {
+		if keyPEM, err = w.Unwrap(ctx, wk.Ciphertext, wrapContext(kind, cert.Raw)); err != nil {
 			return nil, err
 		}
 	} else {
@@ -255,7 +281,7 @@ func LoadCAWrapped(ctx context.Context, dir string, w KeyWrapper) (*CA, error) {
 	if pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool }); !ok || !pub.Equal(cert.PublicKey) {
 		return nil, errors.New("controlauth: the CA key does not match the CA certificate")
 	}
-	return &CA{Cert: cert, Key: signer, PEM: certPEM}, nil
+	return &CA{Cert: cert, Key: signer, PEM: certPEM, kind: kind}, nil
 }
 
 // Issued is a new certificate and its private key, PEM encoded.
@@ -267,6 +293,9 @@ type Issued struct {
 // Issue creates a certificate for p, valid for validFor. Server names (DNS
 // names or IP addresses) are added for a controller certificate.
 func (ca *CA) Issue(p Principal, validFor time.Duration, serverNames []string) (Issued, error) {
+	if ca.kind != controlKind {
+		return Issued{}, errors.New("controlauth: only the control CA issues principals")
+	}
 	if err := p.Validate(); err != nil {
 		return Issued{}, err
 	}

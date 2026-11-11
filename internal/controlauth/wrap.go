@@ -33,11 +33,12 @@ type wrappedKey struct {
 	Ciphertext []byte `json:"ciphertext"`
 }
 
-// wrapContext binds a wrapped CA key to its certificate: a key wrapped for
-// one CA cannot be unwrapped beside another's certificate.
-func wrapContext(certDER []byte) map[string]string {
+// wrapContext binds a wrapped CA key to its kind's purpose and to its
+// certificate: a key wrapped for one CA cannot be unwrapped beside
+// another's certificate, or as the other kind of CA.
+func wrapContext(k caKind, certDER []byte) map[string]string {
 	sum := sha256.Sum256(certDER)
-	return map[string]string{"purpose": "sufuree-control-ca", "ca-cert-sha256": hex.EncodeToString(sum[:])}
+	return map[string]string{"purpose": k.purpose, "ca-cert-sha256": hex.EncodeToString(sum[:])}
 }
 
 // KMSClient is the part of the KMS API the wrapper uses.

@@ -79,6 +79,9 @@ sufuree controller --data-dir DIR --listen ADDR \
   [--edge-listen ADDR]
 sufuree app apply --file spec.json --controller http://127.0.0.1:8080
 sufuree app get NAME --controller http://127.0.0.1:8080
+sufuree ca init|issue ...
+sufuree store-ca init|issue ...
+sufuree replica-key init ...
 ```
 
 `version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` is passed. Raft flags enable a one-voter leadership fence; `--edge-listen` serves the public HTTP edge. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
@@ -234,6 +237,45 @@ Limits:
   request any lowering. Each product client must be scoped to its own
   resources before a second product client exists.
 - **Encoded paths.** Percent-encoded request paths are refused.
+
+### The object store's CA
+
+The object store (SeaweedFS) has a private CA of its own: its components
+authenticate to each other with it, and Sufuree's controller to its filer
+(`replica.json` `filer.client_cert_file`). `sufuree store-ca` keeps that CA
+the way `sufuree ca` keeps the controller's, and issues each certificate on
+its own, so one component's can be replaced without touching the others.
+
+```
+sufuree store-ca init --dir store-ca --kms-key-id alias/sufuree-store-ca
+sufuree store-ca issue --dir store-ca --name filer --server-name 10.0.0.5,filer.internal --out filer/filer
+sufuree store-ca issue --dir store-ca --name sufuree --out sufuree/sufuree
+```
+
+`--name` is the certificate's common name, which SeaweedFS admits gRPC peers
+by (`allowed_commonNames`): lowercase letters, digits and hyphens. With
+`--server-name` the certificate is a component's, for serving and for calling
+other components. Without it the certificate is a client's only (an
+operator's, or the controller's). Certificates default to 30 days and never
+outlive the CA. `issue` refuses to replace a file, so to reissue, write to a
+new prefix and swap the files, then restart that component.
+
+With `--kms-key-id`, the CA key exists on disk only as `ca.key.kms`, as for
+the controller CA. `infra/` declares the key (`alias/sufuree-store-ca`) with
+the same policy shape: the named operator encrypts and decrypts only with the
+store CA purpose in the encryption context, and grants are denied.
+
+The two CAs are separate trust domains. They differ in their certificate's
+common name and their wrapped key's KMS purpose, and neither directory loads
+as, or issues certificates of, the other.
+
+Limits:
+- **No revocation**, as for the controller CA: a compromised certificate is
+  contained by its 30-day life, or by rotating the CA.
+- **Writing `security.toml` is not Sufuree's.** Zati's
+  `poc/nanos/seaweedfs-tls/pki.sh` lays out one directory per component.
+- **The operator who can unwrap the key can issue any name**, including
+  `admin`.
 
 ### Boot generations and floors on the controller
 
