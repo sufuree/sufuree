@@ -104,6 +104,7 @@ func runController(args []string) error {
 	// Loaded before Raft opens, so a bad config or an unreachable KMS
 	// leaves no partial cluster.
 	var replica reconcile.ReplicaIssuer
+	var revoker reconcile.Revoker
 	if *replicaCfg != "" {
 		if !authOn {
 			// Without caller authentication anyone could claim a host and
@@ -115,6 +116,7 @@ func runController(args []string) error {
 			return err
 		}
 		replica = svc
+		revoker = svc
 	}
 	if *execName == "ec2" && (*tlsCert == "" || *tlsKey == "" || *tlsClientCA == "") {
 		return errors.New("--executor ec2 requires --tls-cert, --tls-key and --tls-client-ca")
@@ -205,7 +207,7 @@ func runController(args []string) error {
 	}
 	dem := demand.New(demand.Bolt{Store: journal})
 	c := reconcile.New(journal, effects, dem, reconcile.Options{
-		Tick: tick, Backoff: 15 * time.Second, Logger: log,
+		Tick: tick, Backoff: 15 * time.Second, Logger: log, Revoker: revoker,
 	})
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {

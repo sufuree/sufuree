@@ -136,9 +136,15 @@ func (tx *Tx) installArchive(arch archive) error {
 		byName[bucket.Name] = bucket
 	}
 	for _, name := range allBuckets {
-		if _, ok := byName[string(name)]; !ok {
-			return fmt.Errorf("store: import is missing bucket %q", name)
+		if _, ok := byName[string(name)]; ok {
+			continue
 		}
+		// Archives written before revocations existed have none.
+		if string(name) == string(bucketRevocations) {
+			byName[string(name)] = archiveBucket{Name: string(name)}
+			continue
+		}
+		return fmt.Errorf("store: import is missing bucket %q", name)
 	}
 	for _, name := range allBuckets {
 		b, err := tx.bucket(name)

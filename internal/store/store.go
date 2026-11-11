@@ -40,6 +40,7 @@ var (
 	bucketMeta       = []byte("meta")
 	allBuckets       = [][]byte{
 		bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketMeta,
+		bucketRevocations,
 	}
 )
 
@@ -206,7 +207,7 @@ func (tx *Tx) ensureSchema() error {
 }
 
 func (tx *Tx) emptyData() (bool, error) {
-	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims} {
+	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketRevocations} {
 		b, err := tx.bucket(name)
 		if err != nil {
 			return false, err
@@ -246,6 +247,13 @@ func (tx *Tx) ApplyResource(in resource.Resource) (resource.Resource, error) {
 	}
 	if !found && in.ResourceVersion != 0 {
 		return resource.Resource{}, fmt.Errorf("store: resource %q: %w", in.UID, ErrStaleResourceVersion)
+	}
+	if !found {
+		if _, err := tx.GetRevocation(in.UID); err == nil {
+			return resource.Resource{}, fmt.Errorf("store: resource %q: %w", in.UID, ErrRevoked)
+		} else if !errors.Is(err, ErrNotFound) {
+			return resource.Resource{}, err
+		}
 	}
 	if found && prev.ResourceVersion != in.ResourceVersion {
 		return resource.Resource{}, fmt.Errorf("store: resource %q: %w", in.UID, ErrStaleResourceVersion)
@@ -309,6 +317,9 @@ func (tx *Tx) ListResources() ([]resource.Resource, error) {
 
 // DeleteResource removes a resource that has no operations, placements,
 // claims, or, for a pool, hosts. It does not release provider resources.
+// Deleting an app records its installation identity's revocation in the
+// same transaction (Revocation), which also keeps its UID from being used
+// again.
 func (tx *Tx) DeleteResource(uid string) error {
 	res, err := tx.GetResource(uid)
 	if err != nil {
@@ -316,6 +327,11 @@ func (tx *Tx) DeleteResource(uid string) error {
 	}
 	if err := tx.resourceIdle(res); err != nil {
 		return err
+	}
+	if res.Kind == resource.KindApp {
+		if err := tx.revoke(res.UID, res.UID); err != nil {
+			return err
+		}
 	}
 	return delBucket(tx, bucketResources, uid)
 }
@@ -514,11 +530,17 @@ func (tx *Tx) ListPlacements() ([]resource.Placement, error) {
 }
 
 // DeletePlacement removes the placement record. It does not stop a guest.
+// When the placement held the last copy of a one-off replica ID, that
+// installation identity's revocation is recorded in the same transaction.
 func (tx *Tx) DeletePlacement(uid string) error {
-	if _, err := tx.GetPlacement(uid); err != nil {
+	p, err := tx.GetPlacement(uid)
+	if err != nil {
 		return err
 	}
-	return delBucket(tx, bucketPlacements, uid)
+	if err := delBucket(tx, bucketPlacements, uid); err != nil {
+		return err
+	}
+	return tx.releasedReplica(p)
 }
 
 // PutHost creates a host in an existing pool, or updates readiness,

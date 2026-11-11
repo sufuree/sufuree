@@ -43,11 +43,12 @@ func Allowed(p Principal, method, urlPath string) bool {
 	get, post, put := method == http.MethodGet, method == http.MethodPost, method == http.MethodPut
 	switch seg[1] {
 	case "resources":
-		// GET /v1/resources, GET|PUT /v1/resources/{kind}/{name}
+		// GET /v1/resources, GET|PUT|DELETE /v1/resources/{kind}/{name}.
+		// DELETE does no more than a PUT to lifecycle deleting.
 		switch {
 		case len(seg) == 2 && get:
 			return is(RoleOperator, RoleProductClient)
-		case len(seg) == 4 && (get || put):
+		case len(seg) == 4 && (get || put || method == http.MethodDelete):
 			return is(RoleOperator, RoleProductClient)
 		}
 	case "operations", "warm":

@@ -84,7 +84,7 @@ sufuree store-ca init|issue ...
 sufuree replica-key init ...
 ```
 
-`version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` is passed. Raft flags enable a one-voter leadership fence; `--edge-listen` serves the public HTTP edge. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
+`version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `DELETE /v1/resources/App/{name}`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` is passed. Raft flags enable a one-voter leadership fence; `--edge-listen` serves the public HTTP edge. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
 
 `app apply` sends kind `App`. A repeat of the same spec does not bump the generation. A stale `resource_version` is rejected.
 
@@ -448,13 +448,32 @@ filer that requires a client certificate and signed requests), with
 `SUFUREE_SEAWEED_CLIENT_KEY`. Without the client certificate the filer refuses
 the handshake.
 
+**Deleting an installation.** `DELETE /v1/resources/App/{name}` (operator or
+product client; `If-Match` optional) moves the app to lifecycle `deleting` and
+answers 202. Its placements are released, and once it has no placement,
+operation or live activation claim the controller removes its record. The same
+transaction records a revocation for the installation (the app's UID). The
+controller then deletes the identity file through the filer, so the S3 servers
+stop accepting its key when they reload, and marks the revocation done; a
+failure is retried each pass. A one-off replica ID (`r…`, apps with more than
+one replica) is revoked the same way when its last placement is released.
+Revocations are kept: an app with a revoked UID can't be created again, since
+UIDs come from names and a new app would get the old installation's
+credentials and data. The replica service also refuses to issue credentials
+for a revoked installation, and waits for a registration already running
+before removing the identity, so it isn't written back.
+
 Limits:
 - **A host keeps credentials it was given.** An installation that moves
   keeps its credentials until the version is raised, so the previous host
   still holds a working key. Raise the version after removing a host that
   may be compromised.
-- **Deleted installations keep their identities.** Removing an identity when
-  its installation is deleted is not implemented yet.
+- **A deleted installation's data is kept.** Deleting removes its identity
+  and its record, not the objects under `inst/<id>/`. Retention and erasure
+  are not implemented.
+- **Revocation needs `--replica-credentials`.** A controller started without
+  it records revocations but leaves them pending; one started with it later
+  removes them.
 - **The operator can unwrap the provisioning key.** The KMS key policy lets
   the operator encrypt and decrypt with it (to create the key and run a
   development controller), so the operator alone can derive every

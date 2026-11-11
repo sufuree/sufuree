@@ -174,6 +174,28 @@ func TestSeaweedFS(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	// Revocation: once b's identity is removed, the gateway refuses its key,
+	// and the service issues b nothing more.
+	if err := svc.Revoke(ctx, b); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		c := code(get(cb, Prefix(b)+"/x"))
+		if c == "InvalidAccessKeyId" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a revoked key still gets %s", c)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err := svc.Issue(ctx, b); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Issue after Revoke: %v", err)
+	}
+	if err := get(ca2, own); err != nil {
+		t.Fatalf("revoking b disturbed a: %v", err)
+	}
 	// Signed reads: an unsigned read of an identity file is refused.
 	unsigned := &FilerRegistrar{BaseURL: filer, HTTP: filerHTTP}
 	if _, err := unsigned.Current(ctx, a); err == nil || !strings.Contains(err.Error(), "401") {

@@ -44,7 +44,22 @@ type Options struct {
 	Backoff time.Duration
 	Now     func() time.Time
 	Logger  *slog.Logger
+	// Revoker removes revoked installations' object-store identities
+	// (replicacred.Service). Without it, revocations stay pending.
+	Revoker Revoker
 }
+
+// Revoker removes an installation's object-store identity. Removing one
+// that is already gone succeeds.
+type Revoker interface {
+	Revoke(ctx context.Context, installation string) error
+}
+
+// revokeBatch bounds the revocations one pass works through.
+const revokeBatch = 16
+
+// revokeTimeout bounds one revocation.
+const revokeTimeout = 30 * time.Second
 
 // Controller reconciles one store against one executor.
 type Controller struct {
@@ -56,6 +71,7 @@ type Controller struct {
 	now     func() time.Time
 	log     *slog.Logger
 	last    time.Time
+	revoker Revoker
 
 	mu     sync.Mutex
 	buffer *placement.BufferRecommendation
@@ -76,6 +92,7 @@ func New(db DB, exec executor.Executor, dem *demand.Manager, opt Options) *Contr
 	return &Controller{
 		db: db, exec: exec, demand: dem,
 		tick: opt.Tick, backoff: opt.Backoff, now: opt.Now, log: opt.Logger,
+		revoker: opt.Revoker,
 	}
 }
 
@@ -122,7 +139,88 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 	if err := c.writeStatus(w.now); err != nil {
 		return err
 	}
+	if err := c.finishDeletes(); err != nil {
+		return err
+	}
+	c.revokePending(ctx)
 	return c.AcknowledgeReadyPlacements(ctx)
+}
+
+// finishDeletes removes each deleting app that has nothing left: no
+// placement, claim or operation. Removing it records its installation's
+// revocation (store.DeleteResource). A deleting app's claims past their
+// deadline go first: nothing will place it, and their waiters have given
+// up. Pools are not removed here.
+func (c *Controller) finishDeletes() error {
+	now := c.planNow()
+	return c.db.Update(func(tx *store.Tx) error {
+		all, err := tx.ListResources()
+		if err != nil {
+			return err
+		}
+		claims, err := tx.ListClaims()
+		if err != nil {
+			return err
+		}
+		deleting := map[string]bool{}
+		for _, r := range all {
+			if r.Kind == resource.KindApp && r.Lifecycle == resource.LifecycleDeleting {
+				deleting[r.UID] = true
+			}
+		}
+		for _, cl := range claims {
+			if deleting[cl.ResourceUID] && !cl.Deadline.After(now) {
+				if err := tx.DeleteClaim(cl.UID); err != nil {
+					return err
+				}
+			}
+		}
+		for _, r := range all {
+			if r.Kind != resource.KindApp || r.Lifecycle != resource.LifecycleDeleting {
+				continue
+			}
+			if err := tx.DeleteResource(r.UID); err != nil && !errors.Is(err, store.ErrInUse) {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// revokePending removes the identities of pending revocations, a bounded
+// batch per pass, and records each one done. A failure is logged and
+// retried next pass.
+func (c *Controller) revokePending(ctx context.Context) {
+	if c.revoker == nil {
+		return
+	}
+	var pending []resource.Revocation
+	if err := c.db.View(func(tx *store.Tx) error {
+		all, err := tx.ListRevocations()
+		for _, r := range all {
+			if r.Pending() && len(pending) < revokeBatch {
+				pending = append(pending, r)
+			}
+		}
+		return err
+	}); err != nil {
+		c.log.Error("list revocations", "err", err)
+		return
+	}
+	for _, r := range pending {
+		rctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+		err := c.revoker.Revoke(rctx, r.Installation)
+		cancel()
+		if err != nil {
+			c.log.Error("revoke installation identity", "installation", r.Installation, "err", err)
+			continue
+		}
+		if err := c.db.Update(func(tx *store.Tx) error {
+			return tx.MarkRevoked(r.Installation, c.planNow())
+		}); err != nil {
+			c.log.Error("record revocation", "installation", r.Installation, "err", err)
+		}
+	}
 }
 
 // ApplyResource creates or updates a resource if ResourceVersion matches the
@@ -192,6 +290,39 @@ func (c *Controller) GetResource(_ context.Context, kind resource.Kind, name str
 		return resource.Resource{}, fmt.Errorf("reconcile: %s/%s: %w", kind, name, store.ErrNotFound)
 	}
 	return out, nil
+}
+
+// DeleteResource moves an app to lifecycle deleting, in one transaction, and
+// returns it. ifMatch, when non-zero, must be its current resource version.
+// An app already deleting is returned unchanged. The loop finishes the
+// delete (finishDeletes).
+func (c *Controller) DeleteResource(_ context.Context, kind resource.Kind, name string, ifMatch uint64) (resource.Resource, error) {
+	if kind != resource.KindApp {
+		return resource.Resource{}, fmt.Errorf("reconcile: only an App can be deleted, not %s", kind)
+	}
+	var out resource.Resource
+	err := c.db.Update(func(tx *store.Tx) error {
+		cur, found, err := findByName(tx, kind, name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("reconcile: %s/%s: %w", kind, name, store.ErrNotFound)
+		}
+		if ifMatch != 0 && ifMatch != cur.ResourceVersion {
+			return fmt.Errorf("reconcile: delete %s: %w", cur.UID, store.ErrStaleResourceVersion)
+		}
+		if cur.Lifecycle == resource.LifecycleDeleting {
+			out = cur
+			return nil
+		}
+		next := cur
+		next.Lifecycle = resource.LifecycleDeleting
+		got, err := tx.ApplyResource(next)
+		out = got
+		return err
+	})
+	return out, err
 }
 
 // ListResources returns every resource.
