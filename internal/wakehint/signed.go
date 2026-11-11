@@ -271,6 +271,11 @@ func (v *Verifying) loadRecord(prefix string, keyFor func(uint64) []byte) {
 		var h Hint
 		if h, err = parse(data, prefix, keyFor); err == nil {
 			v.seen, v.last = true, h
+			// The keyring must keep this hint's key: it may be served
+			// only through this record from now on.
+			if v.Keys != nil {
+				v.Keys.Accepted(h.Generation)
+			}
 			return
 		}
 	}

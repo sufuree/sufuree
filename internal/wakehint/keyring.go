@@ -110,6 +110,9 @@ func OpenKeyring(dir, id string) (*Keyring, error) {
 			}
 			f.Keys[i].raw = raw
 		}
+		if n := len(f.Keys); n > 1 && f.Keys[0].Legacy && (f.Keys[0].Below == 0 || f.Keys[0].Below > f.Keys[1].Generation) {
+			return nil, fmt.Errorf("hint keyring %s has a single key that covers a boot's generation", k.path)
+		}
 		k.keys = f.Keys
 		if f.Accepted != nil {
 			k.accepted, k.seen = *f.Accepted, true
@@ -187,8 +190,9 @@ func (k *Keyring) For(generation uint64) []byte {
 
 // Accepted notes that a hint naming generation was accepted. Keys of
 // earlier boots are dropped: any hint they signed is now stale. If that
-// cannot be saved, OnSaveError is told and the next save retries it; the
-// keys are gone from memory at once.
+// cannot be saved, OnSaveError is told and the keys are gone from memory at
+// once. The next boot's key, or an accepted hint from a later boot, saves
+// the keyring again; another hint from the same boot does not.
 func (k *Keyring) Accepted(generation uint64) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
