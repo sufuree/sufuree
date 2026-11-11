@@ -1,3 +1,4 @@
+# https://docs.coderabbit.ai/configuration/auto-review
 reviews:
   auto_review:
     drafts: true
