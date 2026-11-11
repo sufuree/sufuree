@@ -1,0 +1,23 @@
+{
+  "schema": "sufuree.qemu-guest-pin/v1",
+  "arch": "x86_64",
+  "vmm": {
+    "bin": "qemu-system-x86_64",
+    "version_prefix": "",
+    "version_flag": "--version"
+  },
+  "ops": {
+    "bin": "ops",
+    "version_prefix": "",
+    "version_flag": "version"
+  },
+  "image": {
+    "sha256": "",
+    "guest_port": 8080,
+    "format": "raw",
+    "runtime": "nanos",
+    "workload": "stateless-go-http"
+  },
+  "accel": "kvm",
+  "notes": "Build the guest image with Ops outside the ingress. Record image.sha256 before claiming an F05 / live QEMU receipt. Empty sha256 accepts any image for first-time measurement; fill it after the first good run."
+}

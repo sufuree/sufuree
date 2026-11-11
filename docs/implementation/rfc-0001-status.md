@@ -10,7 +10,7 @@ acceptance record, not a cloud deployment, and not RFC-0002.
 
 | Area | Code | Still open for qualification |
 | --- | --- | --- |
-| Host agent | `sufuree host`: Unix sockets, journaled generations, QEMU/KVM guests, idle/scheduled wake | Multi-host enrollment, provider fence, measured wake |
+| Host agent | `sufuree host`: Unix sockets, journaled generations, QEMU/KVM guests, idle/scheduled wake; live QEMU pin schema + opt-in qual (`qemupin`, `TestFixedHostQEMUWakeProxyIdle`) | Multi-host enrollment, provider fence, measured wake on digest-pinned image |
 | Resources + store | Declarative App/Pool, operations, placements, hosts, claims in bbolt (`NoSync=false`), CAS on `resource_version`, Export/Import archive | Encrypted backup, crash tests on target FS |
 | Raft (one voter) | `internal/raftnode` + `internal/controlraft.Journal`: with `--raft-*`, every control `Update` proposes `restore_store` and the FSM `Import` is the only write to `control.db`; snapshots Export/Import the store. Library choice: [ADR-0001](../adr/0001-control-plane-raft-library.md) | Three voters, membership changes, unikernel footprint; typed per-op log entries (today one archive command per mutation) |
 | Executor | Memory + `executor.Gated` growth grant/ledger; `ec2exec` RunInstances/Terminate/Describe/Fence with ClientToken (live AWS opt-in via `--executor ec2`) | Pulumi/Lambda worker custody, durable ledger, live EC2 receipts, volume effects |
@@ -32,4 +32,6 @@ Local (no-AWS) slices: Raft/bootscope
 (`TestLocalZeroOneZeroWithGrant`), and fixed-host guest wake/proxy/idle
 ([rfc-0001-fixed-host.md](../qualification/rfc-0001-fixed-host.md)). Cloud path
 checklist: [rfc-0001-cloud-path.md](../qualification/rfc-0001-cloud-path.md).
-Live QEMU pin and live EC2 0↔1 / two-host drain remain open (spend/image auth).
+Live QEMU receipt (KVM host + digest-pinned image) and live EC2 0↔1 /
+two-host drain remain open (spend/image auth). Pin/harness:
+[rfc-0001-qemu-pin.md](../qualification/rfc-0001-qemu-pin.md).

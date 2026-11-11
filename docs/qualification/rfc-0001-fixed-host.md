@@ -19,18 +19,11 @@ with `aws_spend: false` and `launcher: guest.HTTP`.
 
 ## Pinned QEMU path (live host)
 
-Production hosts still use `guest.QEMU` (`qemu-system-x86_64` + Ops volumes).
-Pin and record on the live host before claiming a QEMU receipt:
-
-| Pin | Candidate |
-| --- | --- |
-| VMM | `qemu-system-x86_64` (KVM) |
-| Image builder | Ops / Nanos volume layout in `internal/guest/qemu.go` |
-| Guest workload | Stateless Go HTTP image (RFC §1 first slice) |
-| Networking | QEMU user-mode hostfwd to `guest_port` |
-
-Live QEMU wake timing and image digests are still open; the HTTP stand-in
-qualifies the edge↔activator↔idle contract only.
+Production hosts use `guest.QEMU` (`qemu-system-x86_64` + Ops volumes). The
+pin file, build steps and opt-in harness are in
+[rfc-0001-qemu-pin.md](rfc-0001-qemu-pin.md) (`TestFixedHostQEMUWakeProxyIdle`,
+`pins/qemu-guest.json`). A green QEMU receipt still requires a live KVM host
+and a digest-pinned guest image; this machine may only skip that test.
 
 ## Fixed-host edge upstream publication
 
