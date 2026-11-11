@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -114,6 +115,42 @@ func TestSeaweedFS(t *testing.T) {
 	// A dot-dot key is refused outright, whatever it would resolve to.
 	if c := code(get(ca, Prefix(a)+"/../"+b+"/x")); c == "OK" {
 		t.Errorf("a read b's object through a .. key")
+	}
+
+	// Hints: a publishes its own hint, not b's, and can't read hints back.
+	// A host's hint key, read-only on hints/, reads it and nothing in inst/.
+	hint := HintPrefix(a) + "/wake.json"
+	if err := put(ca, hint, false); err != nil {
+		t.Fatalf("a publishes its hint: %v", err)
+	}
+	if c := code(put(ca, HintPrefix(b)+"/wake.json", false)); c != "AccessDenied" {
+		t.Errorf("a writes b's hint: %s, want AccessDenied", c)
+	}
+	if c := code(get(ca, hint)); c != "AccessDenied" {
+		t.Errorf("a reads its hint back: %s, want AccessDenied", c)
+	}
+	reader := "it-hints-" + suffix
+	rc, _ := d1.For(reader)
+	rdoc, _ := json.Marshal(identity{Name: IdentityName(reader),
+		Credentials: []identityCredit{{AccessKey: rc.AccessKeyID, SecretKey: rc.SecretAccessKey, Status: "Active"}},
+		Actions:     []string{"Read:" + bucket + "/hints/*"}})
+	hintProbe := func(ctx context.Context, _, _ string, c Credentials) error {
+		return get(c, hint)
+	}
+	hreg := *reg
+	hreg.Probe = hintProbe
+	if err := hreg.Register(ctx, bucket, reader, rdoc, rc); err != nil {
+		t.Fatalf("hint reader: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.remove(reader) })
+	for name, err := range map[string]error{
+		"reads a's lease":   get(rc, own),
+		"writes a hint":     put(rc, HintPrefix(b)+"/wake.json", false),
+		"writes into inst/": put(rc, Prefix(a)+"/evil", false),
+	} {
+		if c := code(err); c != "AccessDenied" {
+			t.Errorf("hint reader %s: %s, want AccessDenied", name, c)
+		}
 	}
 
 	// Rotation: the next version's registration revokes the old key.

@@ -105,6 +105,11 @@ func (d *Deriver) For(installation string) (Credentials, error) {
 // replica session tag value (bootscope.TagValue).
 func Prefix(installation string) string { return "inst/" + installation }
 
+// HintPrefix is where installation publishes its signed wake hint
+// (<HintPrefix>/wake.json), outside its replica prefix. Hosts read hints
+// with a key that reaches only hints/, which holds no replica data.
+func HintPrefix(installation string) string { return "hints/" + installation }
+
 // IdentityName names installation's object-store identity.
 func IdentityName(installation string) string { return "sufuree-" + installation }
 
@@ -122,7 +127,8 @@ type identityCredit struct {
 }
 
 // Identity returns installation's identity document: its one credential
-// may read, write, list and tag only <bucket>/inst/<installation>/*.
+// may read, write, list and tag only <bucket>/inst/<installation>/*, and
+// write (not read) <bucket>/hints/<installation>/*, its wake hint.
 func Identity(bucket, installation string, c Credentials) ([]byte, error) {
 	if err := ValidInstallation(installation); err != nil {
 		return nil, err
@@ -134,6 +140,7 @@ func Identity(bucket, installation string, c Credentials) ([]byte, error) {
 	return json.Marshal(identity{
 		Name:        IdentityName(installation),
 		Credentials: []identityCredit{{AccessKey: c.AccessKeyID, SecretKey: c.SecretAccessKey, Status: "Active"}},
-		Actions:     []string{"Read:" + scope, "Write:" + scope, "List:" + scope, "Tagging:" + scope},
+		Actions: []string{"Read:" + scope, "Write:" + scope, "List:" + scope, "Tagging:" + scope,
+			"Write:" + bucket + "/" + HintPrefix(installation) + "/*"},
 	})
 }
