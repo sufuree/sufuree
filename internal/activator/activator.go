@@ -75,9 +75,10 @@ type Options struct {
 	// workload with replica_credentials. A boot of such a workload fails
 	// without it.
 	Replica ReplicaIssuer
-	// HintKey is the workload's hint key (hint_key_env_key), passed to
-	// every boot. A boot of such a workload fails without it.
-	HintKey []byte
+	// HintKeys issues the workload's hint key (hint_key_env_key), a new
+	// one for every boot (wakehint.Keyring). A boot of such a workload
+	// fails without it.
+	HintKeys HintKeyIssuer
 	// Floor, when set, makes the controller the authority for the boot
 	// generation and the rollback floor (package bootfloor): every boot
 	// asks it for a fresh grant and fails closed without one, and recorded
@@ -87,6 +88,12 @@ type Options struct {
 	// FloorRead is how often an awake workload's hint is read so its
 	// progress reaches the controller (default bootfloor.DefaultInterval).
 	FloorRead time.Duration
+}
+
+// HintKeyIssuer creates the hint key for the boot at generation, durably
+// (wakehint.Keyring).
+type HintKeyIssuer interface {
+	ForBoot(generation uint64) ([]byte, error)
 }
 
 // ReplicaIssuer is the controller's replica credential service as a host
@@ -312,10 +319,17 @@ func (a *Activator) bootOnce() (guest.Guest, uint64, error) {
 		return nil, 0, err
 	}
 	if k := a.spec.HintKeyEnvKey; k != "" {
-		if len(a.opt.HintKey) != wakehint.KeySize {
+		if a.opt.HintKeys == nil {
 			return nil, 0, errors.New("hint_key_env_key is set but the agent has no hint key")
 		}
-		env[k] = hex.EncodeToString(a.opt.HintKey)
+		key, err := a.opt.HintKeys.ForBoot(gen)
+		if err != nil {
+			return nil, 0, fmt.Errorf("hint key: %w", err)
+		}
+		if len(key) != wakehint.KeySize {
+			return nil, 0, errors.New("hint key: the issuer returned a key of the wrong size")
+		}
+		env[k] = hex.EncodeToString(key)
 	}
 	files, err := a.spec.ResolveBootFiles(a.opt.Getenv)
 	if err != nil {
@@ -439,7 +453,7 @@ func (a *Activator) issueGeneration() (uint64, error) {
 // verifiedHintGeneration returns the generation of the current signed
 // hint, or 0 when hints are unsigned or unreadable.
 func (a *Activator) verifiedHintGeneration() uint64 {
-	if a.hints == nil || a.spec.HintPrefix == "" || len(a.opt.HintKey) == 0 {
+	if a.hints == nil || a.spec.HintPrefix == "" || a.opt.HintKeys == nil {
 		return 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ProgressReadTimeout)

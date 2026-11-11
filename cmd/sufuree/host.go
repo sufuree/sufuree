@@ -173,16 +173,16 @@ func runHost(args []string) error {
 		}
 		wh := hints
 		if w.HintKeyEnvKey != "" {
-			key, err := wakehint.LoadOrCreateKey(filepath.Join(cfg.DataDir, "hintkeys"), w.ID)
+			keys, err := wakehint.OpenKeyring(filepath.Join(cfg.DataDir, "hintkeys"), w.ID)
 			if err != nil {
-				return fmt.Errorf("workload %s: hint key: %w", w.ID, err)
+				return fmt.Errorf("workload %s: hint keys: %w", w.ID, err)
 			}
 			src, ok := hints.(wakehint.RawReader)
 			if !ok {
 				return fmt.Errorf("workload %s: hint_key_env_key needs wake_hints", w.ID)
 			}
 			id := w.ID
-			opt.HintKey, wh = key, &wakehint.Verifying{Source: src, Key: key,
+			opt.HintKeys, wh = keys, &wakehint.Verifying{Source: src, Keys: keys,
 				Record: filepath.Join(cfg.DataDir, "hintkeys", w.ID+".last"),
 				OnRefused: func(err error) {
 					log.Warn("refused a wake hint; using the last authentic one", "workload", id, "err", err)

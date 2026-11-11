@@ -3,7 +3,6 @@ package wakehint
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -24,8 +23,8 @@ import (
 // the hint store could forge one: report busy so a workload is never
 // stopped, move next_due so scheduled work is missed, or report progress
 // that blocks every boot. A workload with hint_key_env_key gets a key the
-// host generates and keeps (never in the hint store), delivered in its boot
-// env, and signs every hint:
+// host generates and keeps (never in the hint store), a new one for every
+// boot (keyring.go), delivered in its boot env, and signs every hint:
 //
 //	{"version":2,"hint":<hint>,"mac":"<hex>"}
 //
@@ -74,6 +73,16 @@ func MAC(key []byte, prefix string, hint []byte) []byte {
 // envelope whose MAC verifies for prefix; without one it accepts version 1
 // or the hint inside a version 2 envelope, unverified.
 func Parse(data []byte, prefix string, key []byte) (Hint, error) {
+	if key == nil {
+		return parse(data, prefix, nil)
+	}
+	return parse(data, prefix, func(uint64) []byte { return key })
+}
+
+// parse is Parse with the key chosen by the generation the hint names.
+// keyFor returning nil refuses the hint: no boot at or below that
+// generation has a key. A nil keyFor accepts hints unverified.
+func parse(data []byte, prefix string, keyFor func(generation uint64) []byte) (Hint, error) {
 	var probe struct {
 		Version int `json:"version"`
 	}
@@ -81,7 +90,7 @@ func Parse(data []byte, prefix string, key []byte) (Hint, error) {
 		return Hint{}, errors.New("wakehint: not a hint")
 	}
 	if probe.Version == 1 {
-		if key != nil {
+		if keyFor != nil {
 			return Hint{}, fmt.Errorf("%w: version 1 hints are unsigned", ErrUnauthenticated)
 		}
 		var h Hint
@@ -97,17 +106,33 @@ func Parse(data []byte, prefix string, key []byte) (Hint, error) {
 	if err := json.Unmarshal(data, &e); err != nil || len(e.Hint) == 0 {
 		return Hint{}, errors.New("wakehint: not a version 2 hint")
 	}
-	if key != nil {
+	// The generation is read before the MAC is checked only to choose the
+	// key; nothing else in the hint is used until the MAC verifies.
+	var h Hint
+	herr := json.Unmarshal(e.Hint, &h)
+	if keyFor != nil {
+		if herr != nil {
+			return Hint{}, ErrUnauthenticated
+		}
+		key := keyFor(h.Generation)
 		mac, err := hex.DecodeString(e.MAC)
-		if err != nil || !hmac.Equal(mac, MAC(key, prefix, e.Hint)) {
+		if key == nil || err != nil || !hmac.Equal(mac, MAC(key, prefix, e.Hint)) {
 			return Hint{}, ErrUnauthenticated
 		}
 	}
-	var h Hint
-	if err := json.Unmarshal(e.Hint, &h); err != nil || h.Version != 2 || h.Seq == 0 {
+	if herr != nil || h.Version != 2 || h.Seq == 0 {
 		return Hint{}, errors.New("wakehint: the signed hint is not a version 2 hint with a seq")
 	}
 	return h, nil
+}
+
+// KeySource chooses the key for a hint by the generation it names
+// (Keyring).
+type KeySource interface {
+	// For returns the key for hints naming generation, or nil.
+	For(generation uint64) []byte
+	// Accepted is told the generation of every accepted hint.
+	Accepted(generation uint64)
 }
 
 // RawReader fetches a hint's published bytes.
@@ -129,7 +154,12 @@ type RawReader interface {
 // one an error.
 type Verifying struct {
 	Source RawReader
-	Key    []byte
+	// Keys chooses each hint's key by its generation. It takes precedence
+	// over Key.
+	Keys KeySource
+	// Key is one key for every generation, for a caller that does not
+	// rotate keys.
+	Key []byte
 	// OnRefused, when set, is told of refused stored hints (for logging):
 	// every missing, unsigned or altered one, and an older one once it has
 	// been refused staleReportAfter times in a row (one alone can be a
@@ -163,8 +193,9 @@ var ErrFallback = errors.New("using the last authentic wake hint")
 
 // Read implements Reader.
 func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error) {
-	if len(v.Key) != KeySize {
-		return Hint{}, false, errors.New("wakehint: no hint key")
+	keyFor, err := v.keyFor()
+	if err != nil {
+		return Hint{}, false, err
 	}
 	data, ok, err := v.Source.ReadRaw(ctx, prefix)
 	if err != nil {
@@ -175,13 +206,13 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 	case !ok:
 		err = fmt.Errorf("%s/wake.json: %w: the hint is missing", prefix, ErrUnauthenticated)
 	default:
-		if h, err = Parse(data, prefix, v.Key); err != nil {
+		if h, err = parse(data, prefix, keyFor); err != nil {
 			err = fmt.Errorf("%s/wake.json: %w", prefix, err)
 		}
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.loadRecord(prefix)
+	v.loadRecord(prefix, keyFor)
 	if err == nil && v.seen && (h.Generation < v.last.Generation || (h.Generation == v.last.Generation && h.Seq < v.last.Seq)) {
 		err = fmt.Errorf("%s/wake.json: %w", prefix, ErrStale)
 	}
@@ -190,6 +221,9 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 			v.saveRecord(data)
 		}
 		v.seen, v.last, v.stale = true, h, 0
+		if v.Keys != nil {
+			v.Keys.Accepted(h.Generation)
+		}
 		return h, true, nil
 	}
 	if !v.seen {
@@ -211,9 +245,20 @@ func (v *Verifying) Read(ctx context.Context, prefix string) (Hint, bool, error)
 	return v.last, true, fmt.Errorf("%w: %w", ErrFallback, err)
 }
 
+// keyFor returns how this reader chooses a hint's key.
+func (v *Verifying) keyFor() (func(uint64) []byte, error) {
+	if v.Keys != nil {
+		return v.Keys.For, nil
+	}
+	if len(v.Key) != KeySize {
+		return nil, errors.New("wakehint: no hint key")
+	}
+	return func(uint64) []byte { return v.Key }, nil
+}
+
 // loadRecord reloads the newest accepted hint once, verifying it again with
 // the key and prefix. v.mu must be held.
-func (v *Verifying) loadRecord(prefix string) {
+func (v *Verifying) loadRecord(prefix string, keyFor func(uint64) []byte) {
 	if v.Record == "" || v.recorded {
 		return
 	}
@@ -224,7 +269,7 @@ func (v *Verifying) loadRecord(prefix string) {
 	}
 	if err == nil {
 		var h Hint
-		if h, err = Parse(data, prefix, v.Key); err == nil {
+		if h, err = parse(data, prefix, keyFor); err == nil {
 			v.seen, v.last = true, h
 			return
 		}
@@ -300,51 +345,6 @@ func readPrivate(p string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s is larger than %d bytes", p, limit)
 	}
 	return data, nil
-}
-
-// LoadOrCreateKey returns workload id's hint key from dir, creating it
-// (random, mode 0600, in a 0700 directory) on first use. The key never
-// leaves the host except in that workload's boot env.
-func LoadOrCreateKey(dir, id string) ([]byte, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, err
-	}
-	p := filepath.Join(dir, id+".key")
-	if k, err := readKey(p); err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return k, err
-	}
-	k := make([]byte, KeySize)
-	if _, err := rand.Read(k); err != nil {
-		return nil, err
-	}
-	// Written in full to a temporary file and linked into place, so a crash
-	// never leaves a partial key behind.
-	f, err := os.CreateTemp(dir, "."+id+".key-*")
-	if err != nil {
-		return nil, err
-	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }()
-	cherr := f.Chmod(0o600)
-	_, werr := f.Write(k)
-	serr := f.Sync()
-	cerr := f.Close()
-	if err := errors.Join(cherr, werr, serr, cerr); err != nil {
-		return nil, err
-	}
-	if err := os.Link(tmp, p); errors.Is(err, fs.ErrExist) {
-		return readKey(p) // created concurrently
-	} else if err != nil {
-		return nil, err
-	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return k, nil
 }
 
 func readKey(p string) ([]byte, error) {
