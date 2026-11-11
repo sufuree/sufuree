@@ -452,16 +452,20 @@ the handshake.
 product client; `If-Match` optional) moves the app to lifecycle `deleting` and
 answers 202. Its placements are released, and once it has no placement,
 operation or live activation claim the controller removes its record. The same
-transaction records a revocation for the installation (the app's UID). The
-controller then deletes the identity file through the filer, so the S3 servers
-stop accepting its key when they reload, and marks the revocation done; a
-failure is retried each pass. A one-off replica ID (`r…`, apps with more than
-one replica) is revoked the same way when its last placement is released.
-Revocations are kept: an app with a revoked UID can't be created again, since
-UIDs come from names and a new app would get the old installation's
-credentials and data. The replica service also refuses to issue credentials
-for a revoked installation, and waits for a registration already running
-before removing the identity, so it isn't written back.
+transaction queues a revocation for the installation (the app's UID). The
+controller's revocation loop, separate from the reconcile pass so a slow
+filer can't hold up placement, then deletes the identity file through the
+filer, so the S3 servers stop accepting its key when they reload, and takes
+the revocation off the queue. A failure is retried on a later round, which
+starts after the last installation tried, so failing ones don't starve the
+rest. A one-off replica ID (`r…`, apps with more than one replica) is queued
+the same way when its last placement is released, and leaves no record once
+revoked. A deleted app's UID keeps a tombstone: it can't be created again,
+since UIDs come from names and a new app would get the old installation's
+credentials and data. The edge refuses a deleting app at once. The replica
+service refuses to issue credentials for a revoked installation (410 from
+the credentials route), and waits for a registration already running before
+removing the identity, so it isn't written back.
 
 Limits:
 - **A host keeps credentials it was given.** An installation that moves
@@ -471,6 +475,10 @@ Limits:
 - **A deleted installation's data is kept.** Deleting removes its identity
   and its record, not the objects under `inst/<id>/`. Retention and erasure
   are not implemented.
+- **No rollback past revocations.** A controller from before them refuses
+  a store archive or snapshot that has the `revocations` or `revoke_queue`
+  bucket ("unknown bucket"), so a downgrade needs a store from before the
+  upgrade.
 - **Revocation needs `--replica-credentials`.** A controller started without
   it records revocations but leaves them pending; one started with it later
   removes them.

@@ -182,6 +182,10 @@ func postCredentials(c *Controller, replica ReplicaIssuer, w http.ResponseWriter
 		}
 		// Only after Authorize: the host holds this installation.
 		creds, err := replica.Issue(r.Context(), installation)
+		if errors.Is(err, replicacred.ErrRevoked) {
+			http.Error(w, "replica credentials: "+err.Error(), http.StatusGone)
+			return
+		}
 		if err != nil {
 			http.Error(w, "replica credentials: "+err.Error(), http.StatusServiceUnavailable)
 			return

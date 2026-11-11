@@ -65,20 +65,79 @@ func TestReleasingAOneOffReplicaRecordsItsRevocation(t *testing.T) {
 	mustUpdate(t, s, func(tx *Tx) error { return tx.DeletePlacement("place-moved") })
 	// A one-off ID is revoked when its last placement goes.
 	mustUpdate(t, s, func(tx *Tx) error { return tx.DeletePlacement("place-r") })
-	if got := revocations(t, s); len(got) != 0 {
+	if got := pending(t, s); len(got) != 0 {
 		t.Fatalf("revoked while held or for the app's own UID: %+v", got)
 	}
 	mustUpdate(t, s, func(tx *Tx) error { return tx.DeletePlacement("place-r-twin") })
-	got := revocations(t, s)
+	got := pending(t, s)
 	if len(got) != 1 || got[0].Installation != "r0001" || got[0].ResourceUID != "app-1" || !got[0].Pending() {
-		t.Fatalf("revocations = %+v", got)
+		t.Fatalf("queue = %+v", got)
+	}
+	if got := revocations(t, s); len(got) != 0 {
+		t.Fatalf("a one-off replica ID got a tombstone: %+v", got)
 	}
 
+	// Once revoked, a one-off ID leaves no record at all.
 	at := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	mustUpdate(t, s, func(tx *Tx) error { return tx.MarkRevoked("r0001", at) })
 	mustUpdate(t, s, func(tx *Tx) error { return tx.MarkRevoked("r0001", at.Add(time.Hour)) })
-	if got := revocations(t, s); got[0].Pending() || !got[0].RevokedAt.Equal(at) {
-		t.Fatalf("after MarkRevoked: %+v", got[0])
+	if got, tomb := pending(t, s), revocations(t, s); len(got) != 0 || len(tomb) != 0 {
+		t.Fatalf("after MarkRevoked: queue %+v, tombstones %+v", got, tomb)
+	}
+}
+
+func pending(t *testing.T, s *Store) []resource.Revocation {
+	t.Helper()
+	var out []resource.Revocation
+	if err := s.View(func(tx *Tx) error {
+		var err error
+		out, _, err = tx.PendingRevocations("", 1000)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestPendingRevocationsPagesFromACursor(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	mustUpdate(t, s, func(tx *Tx) error {
+		for _, id := range []string{"r1", "r2", "r3", "r4"} {
+			if err := tx.revoke(id, "app-1"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	page := func(after string, n int) (ids string, more bool) {
+		t.Helper()
+		if err := s.View(func(tx *Tx) error {
+			got, m, err := tx.PendingRevocations(after, n)
+			for _, r := range got {
+				ids += r.Installation + ","
+			}
+			more = m
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return ids, more
+	}
+	for _, c := range []struct {
+		after string
+		n     int
+		want  string
+		more  bool
+	}{
+		{"", 2, "r1,r2,", true},
+		{"r2", 2, "r3,r4,", false},
+		{"r2x", 5, "r3,r4,", false},
+		{"r4", 2, "", false},
+	} {
+		if got, more := page(c.after, c.n); got != c.want || more != c.more {
+			t.Errorf("after %q limit %d: %q more=%v, want %q more=%v", c.after, c.n, got, more, c.want, c.more)
+		}
 	}
 }
 
@@ -96,8 +155,13 @@ func TestDeletingAnAppRevokesItsUIDForGood(t *testing.T) {
 		t.Fatalf("a pool was revoked: %+v", got)
 	}
 	mustUpdate(t, s, func(tx *Tx) error { return tx.DeleteResource("app-1") })
-	if got := revocations(t, s); len(got) != 1 || got[0].Installation != "app-1" {
-		t.Fatalf("revocations = %+v", got)
+	if got := revocations(t, s); len(got) != 1 || got[0].Installation != "app-1" || len(pending(t, s)) != 1 {
+		t.Fatalf("revocations = %+v, queue %+v", got, pending(t, s))
+	}
+	// The tombstone outlives the queue entry.
+	mustUpdate(t, s, func(tx *Tx) error { return tx.MarkRevoked("app-1", time.Now()) })
+	if got := revocations(t, s); len(got) != 1 || got[0].Pending() || len(pending(t, s)) != 0 {
+		t.Fatalf("after MarkRevoked: %+v", got)
 	}
 	err := s.Update(func(tx *Tx) error {
 		_, err := tx.ApplyResource(exampleApp())
@@ -123,7 +187,7 @@ func TestImportAcceptsAnArchiveWithoutRevocations(t *testing.T) {
 	}
 	var kept []any
 	for _, b := range arch["buckets"].([]any) {
-		if b.(map[string]any)["name"] != "revocations" {
+		if n := b.(map[string]any)["name"]; n != "revocations" && n != "revoke_queue" {
 			kept = append(kept, b)
 		}
 	}
