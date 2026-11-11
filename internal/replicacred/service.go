@@ -3,6 +3,7 @@ package replicacred
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -38,10 +39,15 @@ func S3Probe(endpoint, region string, hc *http.Client) func(ctx context.Context,
 	}
 }
 
-// Registrar registers an installation's identity (FilerRegistrar).
+// Registrar registers and removes an installation's identity
+// (FilerRegistrar).
 type Registrar interface {
 	Register(ctx context.Context, bucket, installation string, doc []byte, c Credentials) error
+	Remove(ctx context.Context, installation string) error
 }
+
+// ErrRevoked means the installation's identity was revoked.
+var ErrRevoked = errors.New("replicacred: the installation's credentials were revoked")
 
 // Service issues installations' credentials on the controller, registering
 // each before it is first returned.
@@ -56,6 +62,11 @@ type Service struct {
 	mu         sync.Mutex
 	registered map[string]time.Time
 	inflight   map[string]*call
+	// revoked holds installations Revoke was called for. Issue refuses them
+	// for the life of the process; after a restart the controller's
+	// placements (Issue's caller checks them) and its revocation records
+	// keep them out.
+	revoked map[string]bool
 }
 
 type call struct {
@@ -75,7 +86,7 @@ func NewService(d *Deriver, r Registrar, bucket string, recheck time.Duration) (
 		recheck = 10 * time.Minute
 	}
 	return &Service{deriver: d, registrar: r, bucket: bucket, recheck: recheck,
-		registered: map[string]time.Time{}, inflight: map[string]*call{}}, nil
+		registered: map[string]time.Time{}, inflight: map[string]*call{}, revoked: map[string]bool{}}, nil
 }
 
 // RegisterTimeout bounds one registration, including the probe.
@@ -92,6 +103,10 @@ func (s *Service) Issue(ctx context.Context, installation string) (Credentials, 
 		return Credentials{}, err
 	}
 	s.mu.Lock()
+	if s.revoked[installation] {
+		s.mu.Unlock()
+		return Credentials{}, ErrRevoked
+	}
 	if at, ok := s.registered[installation]; ok && time.Since(at) < s.recheck {
 		s.mu.Unlock()
 		return c, nil
@@ -136,4 +151,30 @@ func (s *Service) register(ctx context.Context, installation string, c Credentia
 		return err
 	}
 	return s.registrar.Register(ctx, s.bucket, installation, doc, c)
+}
+
+// Revoke removes installation's identity from the store, and Issue refuses
+// it from then on. A registration already running finishes first, so it
+// can't write the identity back afterwards. Revoking again repeats the
+// removal; a missing identity is not an error.
+func (s *Service) Revoke(ctx context.Context, installation string) error {
+	if err := ValidInstallation(installation); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.revoked[installation] = true
+	delete(s.registered, installation)
+	cl := s.inflight[installation]
+	s.mu.Unlock()
+	if cl != nil {
+		select {
+		case <-cl.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := s.registrar.Remove(ctx, installation); err != nil {
+		return fmt.Errorf("replicacred: revoke %s: %w", installation, err)
+	}
+	return nil
 }

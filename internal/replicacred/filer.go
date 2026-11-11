@@ -132,6 +132,15 @@ func (f *FilerRegistrar) Register(ctx context.Context, bucket, installation stri
 func (f *FilerRegistrar) remove(installation string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return f.Remove(ctx, installation)
+}
+
+// Remove deletes installation's identity file. A missing file is not an
+// error. The S3 servers stop accepting its credentials once they reload.
+func (f *FilerRegistrar) Remove(ctx context.Context, installation string) error {
+	if err := ValidInstallation(installation); err != nil {
+		return err
+	}
 	res, err := f.do(ctx, http.MethodDelete, f.url(installation), f.WriteKey, nil)
 	if err != nil {
 		return err

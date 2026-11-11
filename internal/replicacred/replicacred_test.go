@@ -264,20 +264,95 @@ func TestFilerRegistrar(t *testing.T) {
 	if probes < 3 {
 		t.Fatalf("the probe ran %d times; it must retry while the store reloads", probes)
 	}
+	// Remove deletes a registered identity, and a missing one is no error.
+	live.Store(true)
+	if err := reg.Register(ctx, "zati", "inst-a", doc, c); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := reg.Remove(ctx, "inst-a"); err != nil {
+			t.Fatalf("Remove %d: %v", i, err)
+		}
+	}
+	if _, ok := ff.files["/etc/iam/identities/sufuree-inst-a.json"]; ok {
+		t.Fatal("Remove left the identity in place")
+	}
 }
 
 type countingRegistrar struct {
-	calls atomic.Int32
-	gate  chan struct{}
-	err   error
+	calls   atomic.Int32
+	gate    chan struct{}
+	err     error
+	mu      sync.Mutex
+	events  []string
+	removed []string
 }
 
-func (r *countingRegistrar) Register(context.Context, string, string, []byte, Credentials) error {
+func (r *countingRegistrar) Register(_ context.Context, _, installation string, _ []byte, _ Credentials) error {
 	r.calls.Add(1)
 	if r.gate != nil {
 		<-r.gate
 	}
+	r.mu.Lock()
+	r.events = append(r.events, "register "+installation)
+	r.mu.Unlock()
 	return r.err
+}
+
+func (r *countingRegistrar) Remove(_ context.Context, installation string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, "remove "+installation)
+	r.removed = append(r.removed, installation)
+	return nil
+}
+
+func TestServiceRevokeWaitsForRegistrationThenRefusesIssue(t *testing.T) {
+	t.Parallel()
+	d, _ := NewDeriver(testKey(1), 1)
+	reg := &countingRegistrar{gate: make(chan struct{})}
+	s, err := NewService(d, reg, "zati", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := make(chan error, 1)
+	go func() {
+		_, err := s.Issue(context.Background(), "inst-a")
+		issued <- err
+	}()
+	for reg.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	revoked := make(chan error, 1)
+	go func() { revoked <- s.Revoke(context.Background(), "inst-a") }()
+	select {
+	case err := <-revoked:
+		t.Fatalf("Revoke returned before the registration finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(reg.gate)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	<-issued
+	reg.mu.Lock()
+	got := strings.Join(reg.events, ",")
+	reg.mu.Unlock()
+	if got != "register inst-a,remove inst-a" {
+		t.Fatalf("events = %s", got)
+	}
+	if _, err := s.Issue(context.Background(), "inst-a"); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Issue after Revoke = %v", err)
+	}
+	if n := reg.calls.Load(); n != 1 {
+		t.Fatalf("registered %d times", n)
+	}
+	if _, err := s.Issue(context.Background(), "inst-b"); err != nil {
+		t.Fatalf("another installation: %v", err)
+	}
+	if err := s.Revoke(context.Background(), "../x"); err == nil {
+		t.Fatal("Revoke accepted an invalid installation")
+	}
 }
 
 func TestServiceRegistersOnceAndSharesConcurrentRegistrations(t *testing.T) {
@@ -333,6 +408,8 @@ func TestServiceReturnsNoCredentialsWhenRegistrationFails(t *testing.T) {
 		t.Fatal("a failed registration was remembered as done")
 	}
 }
+
+func (r *ctxRegistrar) Remove(context.Context, string) error { return nil }
 
 type ctxRegistrar struct {
 	entered chan struct{}

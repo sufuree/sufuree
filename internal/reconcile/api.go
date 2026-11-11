@@ -19,6 +19,7 @@ import (
 // Handler is the local control API.
 //
 //	PUT /v1/resources/{kind}/{name}
+//	DELETE /v1/resources/App/{name}
 //	GET /v1/resources/{kind}/{name}
 //	GET /v1/resources
 //	GET /v1/hosts
@@ -29,6 +30,12 @@ import (
 //
 // PUT rejects a stale ResourceVersion. If-Match, when present, must equal the
 // body's resource_version.
+//
+// DELETE moves an app to lifecycle deleting and answers 202 with it. The
+// controller then releases its placements, removes the record, and removes
+// the installation's object-store identity; GET answers 404 once the record
+// is gone. Its replica data is kept. The name can't be used for an app
+// again. If-Match, when present, must equal the current resource_version.
 func Handler(c *Controller) http.Handler { return HandlerWith(c, nil) }
 
 // ReplicaIssuer issues an installation's replica credentials
@@ -43,6 +50,9 @@ func HandlerWith(c *Controller, replica ReplicaIssuer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /v1/resources/{kind}/{name}", func(w http.ResponseWriter, r *http.Request) {
 		putResource(c, w, r)
+	})
+	mux.HandleFunc("DELETE /v1/resources/{kind}/{name}", func(w http.ResponseWriter, r *http.Request) {
+		deleteResource(c, w, r)
 	})
 	mux.HandleFunc("GET /v1/resources/{kind}/{name}", func(w http.ResponseWriter, r *http.Request) {
 		kind, name, ok := pathResource(w, r)
@@ -227,6 +237,32 @@ func putResource(c *Controller, w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, got)
 }
 
+func deleteResource(c *Controller, w http.ResponseWriter, r *http.Request) {
+	kind, name, ok := pathResource(w, r)
+	if !ok {
+		return
+	}
+	if kind != resource.KindApp {
+		http.Error(w, "only an App can be deleted", http.StatusBadRequest)
+		return
+	}
+	var ifMatch uint64
+	if match := r.Header.Get("If-Match"); match != "" {
+		v, err := strconv.ParseUint(strings.Trim(match, `"`), 10, 64)
+		if err != nil || v == 0 {
+			http.Error(w, "If-Match is not a resource version", http.StatusBadRequest)
+			return
+		}
+		ifMatch = v
+	}
+	got, err := c.DeleteResource(r.Context(), kind, name, ifMatch)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, got)
+}
+
 func pathResource(w http.ResponseWriter, r *http.Request) (resource.Kind, string, bool) {
 	kind, err := parseKind(r.PathValue("kind"))
 	if err != nil {
@@ -267,7 +303,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, store.ErrStaleResourceVersion):
+	case errors.Is(err, store.ErrStaleResourceVersion), errors.Is(err, store.ErrRevoked),
+		errors.Is(err, store.ErrLifecycle):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
