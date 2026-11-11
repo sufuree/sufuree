@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -317,4 +318,50 @@ func freeAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return addr
+}
+
+// TestWrapLeaderOutcomeSemantics verifies that leadership loss and shutdown
+// after admission map to ErrOutcomeUnknown (the command may have committed),
+// while genuine not-leader-at-admission stays ErrNotLeader. Conflating the
+// two tells callers a possibly-committed command never happened.
+func TestWrapLeaderOutcomeSemantics(t *testing.T) {
+	cases := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{"nil", nil, nil},
+		{"not-leader", raft.ErrNotLeader, ErrNotLeader},
+		{"leadership-lost", raft.ErrLeadershipLost, ErrOutcomeUnknown},
+		{"shutdown", raft.ErrRaftShutdown, ErrOutcomeUnknown},
+		{"wrapped-leadership-lost", fmt.Errorf("apply: %w", raft.ErrLeadershipLost), ErrOutcomeUnknown},
+		{"other", errors.New("boom"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapLeader(tc.in)
+			if tc.want == nil {
+				if tc.in == nil {
+					if got != nil {
+						t.Fatalf("nil passthrough: got %v", got)
+					}
+					return
+				}
+				// Unrelated errors pass through unchanged.
+				if got != tc.in {
+					t.Fatalf("passthrough: got %v want %v", got, tc.in)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("wrapLeader(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			if tc.want == ErrOutcomeUnknown && errors.Is(got, ErrNotLeader) {
+				t.Fatal("unknown outcome must not be ErrNotLeader")
+			}
+			if tc.want == ErrNotLeader && errors.Is(got, ErrOutcomeUnknown) {
+				t.Fatal("not-leader must not be ErrOutcomeUnknown")
+			}
+		})
+	}
 }
