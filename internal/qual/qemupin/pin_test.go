@@ -28,6 +28,21 @@ func TestValidRejectsBadSchema(t *testing.T) {
 	}
 }
 
+func TestValidRejectsUnsupportedAccelAndFormat(t *testing.T) {
+	base := Pin{Schema: Schema, Arch: "x86_64", VMM: ToolPin{Bin: "qemu"}, Ops: ToolPin{Bin: "ops"},
+		Image: ImagePin{GuestPort: 8080, Format: "raw"}, Accel: "kvm"}
+	badAccel := base
+	badAccel.Accel = "tcg"
+	if err := badAccel.Valid(); err == nil {
+		t.Fatal("want accel error")
+	}
+	badFmt := base
+	badFmt.Image.Format = "qcow2"
+	if err := badFmt.Valid(); err == nil {
+		t.Fatal("want format error")
+	}
+}
+
 func TestResolveRequiresOptInImage(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvImage, "")

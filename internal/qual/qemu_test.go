@@ -73,15 +73,25 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("wake1 status=%d body=%q", res.StatusCode, body)
 	}
+	_, wakeGen, _, wakeStats := act.Snapshot()
+	if wakeGen < 1 {
+		t.Fatalf("wake generation = %d", wakeGen)
+	}
+	if wakeStats.UnexpectedExits > 0 {
+		t.Fatalf("unexpected exits during wake: %+v", wakeStats)
+	}
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		st, gen, _, _ := act.Snapshot()
-		if st == activator.Asleep && gen >= 1 {
+		st, _, _, stats := act.Snapshot()
+		if stats.UnexpectedExits > 0 {
+			t.Fatalf("unexpected guest exit before idle stop: %+v", stats)
+		}
+		if st == activator.Asleep && stats.IdleStops >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("idle stop: state=%s gen=%d", st, gen)
+			t.Fatalf("idle stop: state=%s stats=%+v", st, stats)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -94,8 +104,8 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	if hz.StatusCode != 200 {
 		t.Fatalf("healthz = %d", hz.StatusCode)
 	}
-	if st, gen, _, _ := act.Snapshot(); st != activator.Asleep {
-		t.Fatalf("healthz disturbed guest: state=%s gen=%d", st, gen)
+	if st, _, _, stats := act.Snapshot(); st != activator.Asleep || stats.UnexpectedExits > 0 {
+		t.Fatalf("healthz disturbed guest: state=%s stats=%+v", st, stats)
 	}
 
 	t1 := time.Now()
@@ -109,8 +119,8 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 		t.Fatalf("rewake status=%d", res.StatusCode)
 	}
 	rec, err := j.Get("web")
-	if err != nil || rec.Generation < 2 {
-		t.Fatalf("journal generation = %+v err=%v", rec, err)
+	if err != nil || rec.Generation <= wakeGen {
+		t.Fatalf("journal generation = %+v wake_gen=%d err=%v", rec, wakeGen, err)
 	}
 
 	receipt := map[string]any{
@@ -126,7 +136,7 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 		"runtime":        resv.Pin.Image.Runtime,
 		"wake_ms":        wakeMS,
 		"rewake_ms":      rewakeMS,
-		"wake_gen":       1,
+		"wake_gen":       wakeGen,
 		"rewake_gen":     rec.Generation,
 		"qualified_at":   time.Now().UTC().Format(time.RFC3339),
 		"pin_sha256_set": resv.Pin.Image.SHA256 != "",
