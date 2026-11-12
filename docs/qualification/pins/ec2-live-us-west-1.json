@@ -1,0 +1,13 @@
+{
+  "schema": "sufuree.ec2-live-pin/v1",
+  "region": "us-west-1",
+  "ami": "ami-09b951240c960809a",
+  "ami_name": "al2023-ami-2023.12.20261109.0-kernel-6.1-x86_64",
+  "instance_type": "t3.micro",
+  "subnet_id": "subnet-0681e1197737567af",
+  "security_group_id": "sg-0cedc2c1c6cdf4d05",
+  "memory_mib": 1024,
+  "grant_max_hosts": 1,
+  "grant_max_memory_mib": 1024,
+  "notes": "Default VPC subnet us-west-1a + default SG. Chosen 2026-11-12 for first live 0↔1 receipt. Do not raise grant_max_hosts without a new spend authorization."
+}
