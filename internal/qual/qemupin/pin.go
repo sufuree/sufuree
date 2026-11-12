@@ -3,6 +3,7 @@
 package qemupin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -93,10 +95,10 @@ func (p Pin) Valid() error {
 		return errors.New("qemupin: ops.bin is required")
 	case p.Image.GuestPort < 1 || p.Image.GuestPort > 65535:
 		return errors.New("qemupin: image.guest_port out of range")
-	case p.Image.Format == "":
-		return errors.New("qemupin: image.format is required")
-	case p.Accel == "":
-		return errors.New("qemupin: accel is required")
+	case p.Image.Format != "raw":
+		return fmt.Errorf("qemupin: image.format %q, guest.QEMU only runs raw", p.Image.Format)
+	case p.Accel != "kvm":
+		return fmt.Errorf("qemupin: accel %q, guest.QEMU only runs with kvm", p.Accel)
 	}
 	return nil
 }
@@ -107,8 +109,8 @@ func Enabled() bool {
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }
 
-// DefaultPinPath returns docs/qualification/pins/qemu-guest.json relative to
-// the module root when discoverable, otherwise empty.
+// DefaultPinPath returns docs/qualification/pins/qemu-guest.json by walking
+// up from the working directory (package dirs under the module root).
 func DefaultPinPath() string {
 	if p := strings.TrimSpace(os.Getenv(EnvPin)); p != "" {
 		return p
@@ -117,18 +119,18 @@ func DefaultPinPath() string {
 	if err != nil {
 		return ""
 	}
-	// Tests often run with cwd = package dir (internal/qual).
-	candidates := []string{
-		filepath.Join(wd, "docs/qualification/pins/qemu-guest.json"),
-		filepath.Join(wd, "../docs/qualification/pins/qemu-guest.json"),
-		filepath.Join(wd, "../../docs/qualification/pins/qemu-guest.json"),
-	}
-	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			return c
+	dir := wd
+	for {
+		candidate := filepath.Join(dir, "docs", "qualification", "pins", "qemu-guest.json")
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
 		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
 	}
-	return ""
 }
 
 // Resolve loads the pin, locates tools/image, and verifies the image digest
@@ -203,16 +205,30 @@ func toolVersion(t ToolPin) (string, error) {
 	if flag == "" {
 		flag = "--version"
 	}
-	out, err := exec.Command(bin, flag).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, flag).CombinedOutput()
 	line := strings.TrimSpace(string(out))
-	if err != nil && line == "" {
-		return "", fmt.Errorf("%s %s: %w", t.Bin, flag, err)
-	}
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
 	}
-	if t.VersionPrefix != "" && !strings.Contains(line, t.VersionPrefix) {
-		return "", fmt.Errorf("%s version %q does not contain %q", t.Bin, line, t.VersionPrefix)
+	if err != nil {
+		if line == "" {
+			return "", fmt.Errorf("%s %s: %w", t.Bin, flag, err)
+		}
+		return "", fmt.Errorf("%s %s: %w: %s", t.Bin, flag, err, line)
+	}
+	if t.VersionPrefix != "" {
+		matched := false
+		for _, tok := range strings.Fields(line) {
+			if strings.HasPrefix(tok, t.VersionPrefix) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return "", fmt.Errorf("%s version %q has no token prefixed with %q", t.Bin, line, t.VersionPrefix)
+		}
 	}
 	return line, nil
 }
