@@ -87,8 +87,8 @@ func (p Pin) Valid() error {
 	switch {
 	case p.Schema != Schema:
 		return fmt.Errorf("qemupin: schema %q, want %q", p.Schema, Schema)
-	case p.Arch == "":
-		return errors.New("qemupin: arch is required")
+	case p.Arch != "x86_64":
+		return fmt.Errorf("qemupin: arch %q, guest.QEMU pin requires x86_64", p.Arch)
 	case p.VMM.Bin == "":
 		return errors.New("qemupin: vmm.bin is required")
 	case p.Ops.Bin == "":

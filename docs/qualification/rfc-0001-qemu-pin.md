@@ -45,9 +45,14 @@ SUFUREE_QUAL_RECEIPT_DIR="$PWD/docs/qualification/receipts" \
 Optional: `SUFUREE_QUAL_QEMU_PIN=/path/to/pin.json` overrides the repo pin.
 
 The harness resolves tools and `/dev/kvm`, verifies the image digest when set,
-then runs edge → `guest.QEMU` wake → proxy → idle → rewake. Receipt:
-`docs/qualification/receipts/fixed-host-qemu-wake-proxy-idle.json`
-(`aws_spend: false`, `launcher: guest.QEMU`, versions + digest + wake_ms).
+then runs edge → `guest.QEMU` wake → proxy → idle → rewake.
+
+| Pin digest | Receipt file |
+| --- | --- |
+| `image.sha256` set and matched | `fixed-host-qemu-wake-proxy-idle.json` (qualification) |
+| `image.sha256` empty | `fixed-host-qemu-wake-proxy-idle-unpinned.json` (measurement only) |
+
+Both record `aws_spend: false`, `launcher: guest.QEMU`, versions + digest + wake_ms.
 
 ## Still open after a green receipt
 
