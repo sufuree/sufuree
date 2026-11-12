@@ -41,6 +41,11 @@ func TestValidRejectsUnsupportedAccelAndFormat(t *testing.T) {
 	if err := badFmt.Valid(); err == nil {
 		t.Fatal("want format error")
 	}
+	badArch := base
+	badArch.Arch = "arm64"
+	if err := badArch.Valid(); err == nil {
+		t.Fatal("want arch error")
+	}
 }
 
 func TestResolveRequiresOptInImage(t *testing.T) {

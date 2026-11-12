@@ -33,6 +33,8 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
+	// Isolate Ops volume names from the operator's default $HOME/.ops store.
+	t.Setenv("HOME", dataDir)
 	j, err := journal.Open(filepath.Join(dataDir, "journal"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +47,7 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	}
 	launcher := &guest.QEMU{
 		DataDir: dataDir,
+		OpsHome: filepath.Join(dataDir, ".ops"),
 		QEMUBin: resv.Pin.VMM.Bin,
 		OpsBin:  resv.Pin.Ops.Bin,
 	}
@@ -56,19 +59,23 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	go act.Run(ctx)
 	t.Cleanup(func() { cancel(); <-act.Done() })
 
+	httpBudget := activator.WakeBudget(spec, 0) + 30*time.Second
 	edgeSrv := httptest.NewServer(&edge.Server{
-		Activator: &edge.HostWake{Service: "web", Act: act, Timeout: 90 * time.Second},
+		Activator: &edge.HostWake{Service: "web", Act: act, Timeout: httpBudget},
 	})
 	t.Cleanup(edgeSrv.Close)
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := &http.Client{Timeout: httpBudget}
 
 	t0 := time.Now()
 	res, err := client.Get(edgeSrv.URL + "/svc/web/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	res.Body.Close()
+	if err != nil {
+		t.Fatalf("wake1 body: %v", err)
+	}
 	wakeMS := time.Since(t0).Milliseconds()
 	if res.StatusCode != 200 {
 		t.Fatalf("wake1 status=%d body=%q", res.StatusCode, body)
@@ -113,18 +120,29 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rewakeBody, err := io.ReadAll(res.Body)
 	res.Body.Close()
+	if err != nil {
+		t.Fatalf("rewake body: %v", err)
+	}
 	rewakeMS := time.Since(t1).Milliseconds()
 	if res.StatusCode != 200 {
-		t.Fatalf("rewake status=%d", res.StatusCode)
+		t.Fatalf("rewake status=%d body=%q", res.StatusCode, rewakeBody)
 	}
 	rec, err := j.Get("web")
 	if err != nil || rec.Generation <= wakeGen {
 		t.Fatalf("journal generation = %+v wake_gen=%d err=%v", rec, wakeGen, err)
 	}
 
+	pinned := resv.Pin.Image.SHA256 != ""
+	scenario := "fixed-host-qemu-wake-proxy-idle-unpinned"
+	receiptName := "fixed-host-qemu-wake-proxy-idle-unpinned.json"
+	if pinned {
+		scenario = "fixed-host-qemu-wake-proxy-idle"
+		receiptName = "fixed-host-qemu-wake-proxy-idle.json"
+	}
 	receipt := map[string]any{
-		"scenario":       "fixed-host-qemu-wake-proxy-idle",
+		"scenario":       scenario,
 		"aws_spend":      false,
 		"launcher":       "guest.QEMU",
 		"image_path":     resv.ImagePath,
@@ -139,19 +157,19 @@ func TestFixedHostQEMUWakeProxyIdle(t *testing.T) {
 		"wake_gen":       wakeGen,
 		"rewake_gen":     rec.Generation,
 		"qualified_at":   time.Now().UTC().Format(time.RFC3339),
-		"pin_sha256_set": resv.Pin.Image.SHA256 != "",
+		"pin_sha256_set": pinned,
 	}
 	if dir := os.Getenv("SUFUREE_QUAL_RECEIPT_DIR"); dir != "" {
-		writeQEMUReceipt(t, dir, receipt)
+		writeQEMUReceipt(t, dir, receiptName, receipt)
 	}
 }
 
-func writeQEMUReceipt(t *testing.T, dir string, receipt map[string]any) {
+func writeQEMUReceipt(t *testing.T, dir, name string, receipt map[string]any) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "fixed-host-qemu-wake-proxy-idle.json")
+	path := filepath.Join(dir, name)
 	buf, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		t.Fatal(err)
