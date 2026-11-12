@@ -1,0 +1,18 @@
+{
+  "ami": "ami-09b951240c960809a",
+  "ami_name": "al2023-ami-2023.12.20261109.0-kernel-6.1-x86_64",
+  "aws_spend": true,
+  "create_ms": 1242,
+  "create_operation": "create-qual-live-ec2-20261112-041346",
+  "deployment": "qual-live-ec2-20261112-041346",
+  "grant_max_hosts": 1,
+  "instance_type": "t3.micro",
+  "memory_mib": 1024,
+  "provider_id": "i-00093214c80f6d75d",
+  "qualified_at": "2026-11-12T04:14:04Z",
+  "region": "us-west-1",
+  "scenario": "live-ec2-zero-one-zero",
+  "security_group_id": "sg-0cedc2c1c6cdf4d05",
+  "subnet_id": "subnet-0681e1197737567af",
+  "terminate_fence_ms": 15769
+}

@@ -5,7 +5,7 @@ Minimum reliable cloud/runtime qualification, in order:
 1. **Growth grant + capacity ledger** (`internal/budget`, `executor.Gated`) — done in-tree.
 2. **EC2 executor** (`internal/executor/ec2exec`) — Create/Terminate/Describe with `ClientToken`, deployment tags, and `Fence` (terminate + wait terminal). Volume effects still fail closed.
 3. **Fixed-host guest E2E** — CI path done (`TestFixedHostGuestWakeProxyIdle` + `guest.HTTP`); live QEMU harness + pin schema ready (`TestFixedHostQEMUWakeProxyIdle`, [rfc-0001-qemu-pin.md](rfc-0001-qemu-pin.md)) — receipt still needs a KVM host + digest-pinned image.
-4. **Live 0↔1 + two-host drain receipts** — still open; requires authorized AWS spend.
+4. **Live 0↔1 + two-host drain receipts** — live 0↔1 receipt landed ([rfc-0001-live-ec2.md](rfc-0001-live-ec2.md)); two-host drain still open.
 
 ## Controller flags
 
@@ -56,5 +56,5 @@ Live QEMU (opt-in, needs KVM + image): see [rfc-0001-qemu-pin.md](rfc-0001-qemu-
 | Fixed-host guest wake/proxy/idle (HTTP stand-in) | `TestFixedHostGuestWakeProxyIdle` |
 | Fixed-host QEMU pin schema + opt-in harness | `qemupin` + `TestFixedHostQEMUWakeProxyIdle` (skip without opt-in) |
 | Fixed-host guest on pinned QEMU image | not run (needs KVM host + `SUFUREE_QUAL_GUEST_IMAGE`) |
-| Live EC2 create/terminate under grant | not run (needs spend auth + AMI/network) |
+| Live EC2 create/terminate under grant | receipt `live-ec2-zero-one-zero.json` ([rfc-0001-live-ec2.md](rfc-0001-live-ec2.md)) |
 | Two-host drain / stale owner | not started |
