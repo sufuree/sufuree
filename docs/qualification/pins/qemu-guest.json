@@ -12,7 +12,7 @@
     "version_flag": "version"
   },
   "image": {
-    "sha256": "",
+    "sha256": "abadc5550aeba6f141a3425f98f934108fbfaa5d17eaab9815534532f2d66234",
     "guest_port": 8080,
     "format": "raw",
     "runtime": "nanos",
