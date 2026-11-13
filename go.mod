@@ -2,10 +2,6 @@ module github.com/sufuree/sufuree
 
 go 1.26.1
 
-require github.com/sufuree/raft v0.0.0
-
-replace github.com/sufuree/raft => ../raft
-
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.8
 	github.com/aws/aws-sdk-go-v2/config v1.33.16
@@ -15,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.9
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.9
 	github.com/aws/smithy-go v1.28.8
+	github.com/sufuree/raft v0.0.0-20261112162430-82d3c7288969
 	go.etcd.io/bbolt v1.4.3
 )
 

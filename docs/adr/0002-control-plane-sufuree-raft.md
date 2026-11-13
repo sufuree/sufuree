@@ -10,9 +10,10 @@ receipt and a Linux reference), which satisfies the adoption conditions ADR-0001
 ## Decision
 
 Sufuree's control-plane voter (`internal/raftnode`) now runs on **`github.com/sufuree/raft`**
-(`driver` + `wal` + `transport`) instead of HashiCorp Raft + raft-boltdb. Until the library is
-published as a versioned module, it is consumed through a local `replace github.com/sufuree/raft => ../raft`
-directive; pin a released version before any deployment qualification receipt.
+(`driver` + `wal` + `transport`) instead of HashiCorp Raft + raft-boltdb. It is pinned to the published
+commit `82d3c72` (pseudo-version `v0.0.0-20261112162430-82d3c7288969`), so a fresh clone builds
+without a sibling checkout. The library has no tagged release yet; re-pin to a tagged version
+when one exists and re-run qualification before deployment acceptance.
 
 `internal/controlraft` is unchanged in contract: authoritative mutations still enter the log as
 `restore_store` archive commands (and `boot_floor` commands), and the FSM Import remains the only
@@ -64,7 +65,8 @@ live data is affected.
   three-voter membership/recovery remain open, as in ADR-0001.
 - The library has its own Nanos receipt, but the **combined Sufuree edge/controller footprint** on the
   nano instance is still unmeasured (RFC-0001 F11/F17); a library receipt is not a Sufuree deployment receipt.
-- Pin a published library version and re-run qualification before claiming cloud/runtime acceptance.
+- The library is pinned to a published commit (no tagged release yet); re-pin to a tagged version
+  and re-run qualification before claiming cloud/runtime acceptance.
 
 ## References
 
