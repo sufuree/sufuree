@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/raft"
 	"github.com/sufuree/sufuree/internal/resource"
 	"github.com/sufuree/sufuree/internal/store"
 )
@@ -39,7 +38,7 @@ func TestBootstrapApplyRestart(t *testing.T) {
 	if !errors.Is(err, ErrExistingState) {
 		t.Fatalf("second bootstrap err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "raft-log.db")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, walFile)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,11 +70,27 @@ func TestBootstrapFalseOnEmptyDir(t *testing.T) {
 	if !errors.Is(err, ErrRecoveryRequired) {
 		t.Fatalf("empty dir err = %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "raft-log.db")); !os.IsNotExist(statErr) {
-		t.Fatalf("created raft log: %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(dir, walFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("created wal: %v", statErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "snapshots")); !os.IsNotExist(statErr) {
-		t.Fatalf("created snapshots: %v", statErr)
+}
+
+func TestLegacyStateRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, legacyLogFile), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(Config{
+		DataDir: dir, NodeID: "controller-1", BindAddr: freeAddr(t), Bootstrap: true,
+	}, &CommandFSM{})
+	if !errors.Is(err, ErrLegacyState) {
+		t.Fatalf("legacy bootstrap err = %v", err)
+	}
+	_, err = Open(Config{
+		DataDir: dir, NodeID: "controller-1", BindAddr: freeAddr(t), Bootstrap: false,
+	}, &CommandFSM{})
+	if !errors.Is(err, ErrLegacyState) {
+		t.Fatalf("legacy open err = %v", err)
 	}
 }
 
@@ -104,11 +119,11 @@ func TestSingleVoterLeaderAndNonLeaderApply(t *testing.T) {
 	if err := n.Apply(context.Background(), []byte(`{"op":"nope"}`), 0); err == nil {
 		t.Fatal("zero timeout accepted")
 	}
-	if err := n.Raft().Shutdown().Error(); err != nil {
+	if err := n.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if n.IsLeader() {
-		t.Fatal("shutdown node is leader")
+		t.Fatal("closed node is leader")
 	}
 	err := n.Apply(context.Background(), []byte(`{"op":"put","payload":{}}`), time.Second)
 	if !errors.Is(err, ErrNotLeader) {
@@ -133,9 +148,8 @@ func TestSnapshotRestoresStore(t *testing.T) {
 	if err := n.Apply(ctx, []byte(`{"op":"put-app","payload":{}}`), 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := n.Raft().Snapshot().Error(); err != nil {
-		t.Fatal(err)
-	}
+	n.Snapshot()
+	waitSnapshot(t, n)
 	if err := n.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +247,7 @@ type record struct {
 	ops []string
 }
 
-func (r *record) fsm() raft.FSM {
+func (r *record) fsm() *CommandFSM {
 	return &CommandFSM{
 		ApplyFn: func(op string, payload []byte) error {
 			r.mu.Lock()
@@ -265,7 +279,7 @@ func (r *record) copy() []string {
 	return append([]string(nil), r.ops...)
 }
 
-func openNode(t *testing.T, dir, addr string, bootstrap bool, fsm raft.FSM) *Node {
+func openNode(t *testing.T, dir, addr string, bootstrap bool, fsm *CommandFSM) *Node {
 	t.Helper()
 	n, err := Open(Config{
 		DataDir:   dir,
@@ -289,7 +303,20 @@ func waitLeader(t *testing.T, n *Node) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("state = %s", n.Raft().State())
+	t.Fatal("node did not become leader")
+}
+
+func waitSnapshot(t *testing.T, n *Node) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		meta, err := n.SnapshotMeta()
+		if err == nil && meta.Index > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("snapshot was not persisted")
 }
 
 func waitRecord(t *testing.T, rec *record, want string) {

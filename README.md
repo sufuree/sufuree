@@ -9,8 +9,8 @@ small isolated guests and demand-driven host autoscaling.
 
 **Status: RFC-0001 application/runtime code surface is implemented in-tree; not qualified.**
 `sufuree host` runs the single-host agent (see [Single-host slice](#single-host-slice)).
-`sufuree controller` reconciles App/Pool specs through a durable bbolt store, optional one-voter Raft leadership, a pack-first planner with warm observe/active, demand handoff, and an executor that refuses cloud effects unless `--executor memory` is set.
-Optional `--edge-listen` mounts the HTTP edge. There is no AWS executor, no three-voter quorum, no measured cost saving, and no `sufuree db` (RFC-0002).
+`sufuree controller` reconciles App/Pool specs through a durable bbolt store, optional one-voter Raft leadership on [`github.com/sufuree/raft`](docs/adr/0002-control-plane-sufuree-raft.md), a pack-first planner with warm observe/active, demand handoff, a durable growth-grant ledger, and an executor that refuses cloud effects unless `--executor memory` or `--executor ec2` is set.
+Optional `--edge-listen` mounts the HTTP edge (TLS via `--edge-tls-cert`/`--edge-tls-key`); `--metrics-listen` serves read-only Prometheus metrics. There is an opt-in EC2 executor (`--executor ec2`, real spend), but no three-voter quorum, no measured cost saving, and no `sufuree db` (RFC-0002).
 See [RFC-0001 implementation status](docs/implementation/rfc-0001-status.md).
 
 ## How it is designed to work
@@ -74,9 +74,10 @@ ownership enforcement, runtime compatibility and real cost measurements.
 sufuree version
 sufuree host --config host.json
 sufuree controller --data-dir DIR --listen ADDR \
-  [--executor memory] [--deployment ID] \
+  [--executor memory|ec2] [--deployment ID] \
   [--raft-bind ADDR --raft-id ID [--raft-bootstrap]] \
-  [--edge-listen ADDR]
+  [--edge-listen ADDR] [--edge-tls-cert CERT --edge-tls-key KEY] \
+  [--metrics-listen ADDR]
 sufuree app apply --file spec.json --controller http://127.0.0.1:8080
 sufuree app get NAME --controller http://127.0.0.1:8080
 sufuree ca init|issue ...
@@ -84,7 +85,7 @@ sufuree store-ca init|issue ...
 sufuree replica-key init ...
 ```
 
-`version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `DELETE /v1/resources/App/{name}`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` is passed. Raft flags enable a one-voter leadership fence; `--edge-listen` serves the public HTTP edge. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
+`version` prints `0.1.0-rfc0001`. `host` is unchanged. `controller` serves the local JSON API (`PUT/GET /v1/resources/...`, `DELETE /v1/resources/App/{name}`, `GET /v1/hosts`, `GET /v1/hosts/{id}/assignments`, `GET /v1/operations`, `GET /v1/warm`) and reconciles on a one-second tick. Effects stay disabled unless `--executor memory` or `--executor ec2` is passed; `ec2` makes real AWS calls under a growth grant and requires mutual TLS. Raft flags enable a one-voter leadership fence on `github.com/sufuree/raft`; `--edge-listen` serves the public HTTP edge (TLS with `--edge-tls-cert`/`--edge-tls-key`); `--metrics-listen` serves read-only Prometheus metrics. `--deployment` records a cluster identity only when the store does not already have one; the process does not invent that id. Without cluster meta, spec writes still succeed and host create/terminate operations are refused.
 
 `app apply` sends kind `App`. A repeat of the same spec does not bump the generation. A stale `resource_version` is rejected.
 

@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/raft"
+	"github.com/sufuree/raft/driver"
 
 	"github.com/sufuree/sufuree/internal/bootfloor"
 	"github.com/sufuree/sufuree/internal/raftnode"
@@ -266,7 +266,7 @@ func (j *Journal) stage(fn func(*store.Tx) error) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// AsFSM returns the raft.FSM for Open. Convenience for the controller wiring.
-func AsFSM(st *store.Store) raft.FSM {
+// AsFSM returns the driver.FSM for Open. Convenience for the controller wiring.
+func AsFSM(st *store.Store) driver.FSM {
 	return StoreFSM(st)
 }

@@ -38,9 +38,10 @@ var (
 	bucketHosts      = []byte("hosts")
 	bucketClaims     = []byte("claims")
 	bucketMeta       = []byte("meta")
+	bucketBudget     = []byte("budget")
 	allBuckets       = [][]byte{
 		bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketMeta,
-		bucketRevocations, bucketRevokeQueue,
+		bucketRevocations, bucketRevokeQueue, bucketBudget,
 	}
 )
 
@@ -207,7 +208,7 @@ func (tx *Tx) ensureSchema() error {
 }
 
 func (tx *Tx) emptyData() (bool, error) {
-	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketRevocations, bucketRevokeQueue} {
+	for _, name := range [][]byte{bucketResources, bucketOperations, bucketPlacements, bucketHosts, bucketClaims, bucketRevocations, bucketRevokeQueue, bucketBudget} {
 		b, err := tx.bucket(name)
 		if err != nil {
 			return false, err
@@ -795,4 +796,18 @@ func delBucket(tx *Tx, name []byte, key string) error {
 		return fmt.Errorf("store: %s %q: %w", name, key, ErrNotFound)
 	}
 	return b.Delete([]byte(key))
+}
+
+// PutBudgetReservation durably records one growth-ledger entry (RFC-0001 F01).
+// It is keyed by operation ID so a restart re-seeds spent capacity.
+func (tx *Tx) PutBudgetReservation(r resource.BudgetReservation) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	return putBucket(tx, bucketBudget, r.OperationID, r)
+}
+
+// ListBudgetReservations returns every durable growth-ledger entry.
+func (tx *Tx) ListBudgetReservations() ([]resource.BudgetReservation, error) {
+	return listBucket[resource.BudgetReservation](tx, bucketBudget)
 }

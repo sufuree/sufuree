@@ -56,5 +56,21 @@ Live QEMU (opt-in, needs KVM + image): see [rfc-0001-qemu-pin.md](rfc-0001-qemu-
 | Fixed-host guest wake/proxy/idle (HTTP stand-in) | `TestFixedHostGuestWakeProxyIdle` |
 | Fixed-host QEMU pin schema + opt-in harness | `qemupin` + `TestFixedHostQEMUWakeProxyIdle` (skip without opt-in) |
 | Fixed-host guest on pinned QEMU image | not run (needs KVM host + `SUFUREE_QUAL_GUEST_IMAGE`) |
-| Live EC2 create/terminate under grant | not run (needs spend auth + AMI/network) |
+| Live EC2 create/terminate under grant | `TestLiveEC2CreateTerminateFence` (opt-in `SUFUREE_QUAL_EC2=1`, real spend); receipt `receipts/live-ec2-create-terminate-fence.json` |
 | Two-host drain / stale owner | not started |
+
+### Live EC2 receipt (real spend, owner-authorized ≤ $10)
+
+```bash
+SUFUREE_QUAL_EC2=1 SUFUREE_QUAL_EC2_REGION=us-west-1 \
+SUFUREE_QUAL_EC2_AMI=ami-... SUFUREE_QUAL_EC2_SUBNET=subnet-... \
+SUFUREE_QUAL_EC2_INSTANCE_TYPE=t3.nano \
+SUFUREE_QUAL_RECEIPT_DIR="$PWD/docs/qualification/receipts" \
+  go test ./internal/qual/ -run TestLiveEC2CreateTerminateFence -count=1 -timeout 8m
+```
+
+Creates one `t3.nano` under a growth grant, proves ClientToken idempotency (no
+second purchase), fences to observed terminal state, releases the grant, and
+always terminates the instance and deletes its temporary security group. This
+qualifies the F01 provider-effect path only; it is not a guest-wake or
+host-scale-to-zero receipt (those need the pinned host image / KVM).

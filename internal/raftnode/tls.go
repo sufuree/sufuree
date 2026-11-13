@@ -1,103 +1,59 @@
 package raftnode
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
-	"errors"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net"
-	"sync"
 	"time"
-
-	"github.com/hashicorp/raft"
 )
 
-// PeerTLS authenticates Raft peers both ways: Server for accepted
-// connections, Client for dialled ones. Both must verify the peer's
-// certificate (controlauth.PeerTLS builds them).
-type PeerTLS struct {
-	Server *tls.Config
-	Client *tls.Config
-}
-
-// tlsStream is a raft.StreamLayer over mutually authenticated TLS.
-type tlsStream struct {
-	ln     net.Listener
-	client *tls.Config
-}
-
-func newTLSStream(bind string, p *PeerTLS) (*tlsStream, error) {
-	if p == nil || p.Server == nil || p.Client == nil {
-		return nil, errors.New("raftnode: peer TLS needs server and client configs")
-	}
-	ln, err := tls.Listen("tcp", bind, p.Server)
+// devTLS builds an ephemeral self-signed certificate for the development and
+// test path (Config.TLS nil). The github.com/sufuree/raft transport always
+// requires mutual TLS, so even a single local voter needs a certificate. This
+// is NOT production trust: production callers pass controlauth.RaftTransportTLS.
+// The certificate is its own CA, carries server+client usage, and is valid for
+// the loopback addresses the dev transport binds.
+func devTLS() (*tls.Config, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	return &tlsStream{ln: ln, client: p.Client}, nil
-}
-
-// handshakeTimeout bounds an accepted connection's TLS handshake, so a
-// peer that connects and never authenticates doesn't hold it open.
-var handshakeTimeout = 10 * time.Second // var for tests
-
-// Accept returns a connection that completes its handshake, under a
-// deadline, on first use. The handshake isn't done here: one slow client
-// must not stall the accept loop.
-func (s *tlsStream) Accept() (net.Conn, error) {
-	c, err := s.ln.Accept()
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, err
 	}
-	tc, ok := c.(*tls.Conn)
-	if !ok {
-		_ = c.Close()
-		return nil, errors.New("raftnode: accepted a non-TLS connection")
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "sufuree-raft-dev"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:              []string{"localhost"},
 	}
-	if err := tc.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		_ = tc.Close()
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
 		return nil, err
 	}
-	return &handshakeConn{Conn: tc}, nil
-}
-
-// handshakeConn handshakes on first Read or Write, then clears the
-// handshake deadline.
-type handshakeConn struct {
-	*tls.Conn
-	once sync.Once
-	err  error
-}
-
-func (c *handshakeConn) handshake() error {
-	c.once.Do(func() {
-		if c.err = c.Conn.Handshake(); c.err != nil {
-			_ = c.Conn.Close()
-			return
-		}
-		c.err = c.Conn.SetDeadline(time.Time{})
-	})
-	return c.err
-}
-
-func (c *handshakeConn) Read(b []byte) (int, error) {
-	if err := c.handshake(); err != nil {
-		return 0, err
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
 	}
-	return c.Conn.Read(b)
-}
-
-func (c *handshakeConn) Write(b []byte) (int, error) {
-	if err := c.handshake(); err != nil {
-		return 0, err
-	}
-	return c.Conn.Write(b)
-}
-
-func (s *tlsStream) Close() error   { return s.ln.Close() }
-func (s *tlsStream) Addr() net.Addr { return s.ln.Addr() }
-
-// Dial connects and completes the handshake (so the peer is verified)
-// before Raft writes to it.
-func (s *tlsStream) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: timeout}, Config: s.client}
-	return d.Dial("tcp", string(address))
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: cert}},
+		ClientCAs:    pool,
+		RootCAs:      pool,
+	}, nil
 }

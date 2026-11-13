@@ -62,3 +62,70 @@ func TestReleasedCannotConfirm(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestLedgerPersistAndSeed(t *testing.T) {
+	durable := map[string]Reservation{}
+	l := &Ledger{
+		Grant: Grant{DeploymentUID: "dep-1", MaxHosts: 2, MaxMemoryMiB: 1024},
+		Persist: func(op string, r Reservation) error {
+			durable[op] = r
+			return nil
+		},
+	}
+	if err := l.ReserveCreate("op-1", 256); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Confirm("op-1"); err != nil {
+		t.Fatal(err)
+	}
+	if durable["op-1"].State != "confirmed" || durable["op-1"].MemoryMiB != 256 {
+		t.Fatalf("durable = %+v", durable["op-1"])
+	}
+
+	// A fresh ledger re-seeds spent capacity from the durable records.
+	reborn := &Ledger{Grant: l.Grant}
+	reborn.Seed(durable)
+	if hosts, mem := reborn.Usage(); hosts != 1 || mem != 256 {
+		t.Fatalf("re-seeded usage = %d hosts, %d MiB", hosts, mem)
+	}
+	// The same operation stays idempotent after re-seed (no double count).
+	if err := reborn.ReserveCreate("op-1", 256); err != nil {
+		t.Fatal(err)
+	}
+	if hosts, _ := reborn.Usage(); hosts != 1 {
+		t.Fatalf("double counted: %d hosts", hosts)
+	}
+	// A released operation cannot be reused after re-seed.
+	if err := reborn.Release("op-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reborn.ReserveCreate("op-1", 256); err == nil {
+		t.Fatal("released operation was reused")
+	}
+}
+
+func TestLedgerPersistFailureRollsBack(t *testing.T) {
+	fail := true
+	l := &Ledger{
+		Grant: Grant{DeploymentUID: "dep-1", MaxHosts: 2, MaxMemoryMiB: 1024},
+		Persist: func(op string, r Reservation) error {
+			if fail {
+				return errors.New("disk full")
+			}
+			return nil
+		},
+	}
+	if err := l.ReserveCreate("op-1", 256); err == nil {
+		t.Fatal("a failed durable write admitted a reservation")
+	}
+	if hosts, mem := l.Usage(); hosts != 0 || mem != 0 {
+		t.Fatalf("failed persist left usage = %d, %d", hosts, mem)
+	}
+	fail = false
+	if err := l.ReserveCreate("op-1", 256); err != nil {
+		t.Fatal(err)
+	}
+	if hosts, _ := l.Usage(); hosts != 1 {
+		t.Fatalf("usage after retry = %d", hosts)
+	}
+}

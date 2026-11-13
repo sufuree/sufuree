@@ -1,0 +1,12 @@
+{
+  "ami": "ami-0f60302edeb87e255",
+  "aws_spend": true,
+  "create_ms": 1246,
+  "fence_ms": 12799,
+  "idempotent": true,
+  "instance_id": "i-02a7ce6cc119b4709",
+  "instance_type": "t3.nano",
+  "qualified_at": "2026-11-13T06:55:17Z",
+  "region": "us-west-1",
+  "scenario": "live-ec2-create-terminate-fence"
+}
