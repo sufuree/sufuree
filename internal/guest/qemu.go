@@ -195,13 +195,28 @@ func (q *QEMU) Boot(ctx context.Context, w workload.Spec, generation uint64, env
 	}
 	cmd := exec.Command(q.bin(q.QEMUBin, "qemu-system-x86_64"), args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Capture QEMU's own stdout/stderr so an immediate exit (bad disk, KVM
+	// init failure, machine config) is diagnosable; the guest serial log is
+	// empty when QEMU never boots the kernel.
+	var qemuLog *os.File
+	if f, ferr := os.Create(filepath.Join(logs, fmt.Sprintf("%s.%d.qemu.log", w.ID, generation))); ferr == nil {
+		qemuLog = f
+		cmd.Stdout = f
+		cmd.Stderr = f
+	}
 	if err := cmd.Start(); err != nil {
+		if qemuLog != nil {
+			_ = qemuLog.Close()
+		}
 		_ = os.Remove(boot)
 		return nil, fmt.Errorf("qemu: %w", err)
 	}
 	g := &qemuGuest{cmd: cmd, addr: fmt.Sprintf("127.0.0.1:%d", port), exited: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
+		if qemuLog != nil {
+			_ = qemuLog.Close()
+		}
 		// The boot volume holds this boot's env and secret files.
 		_ = os.Remove(boot)
 		close(g.exited)
