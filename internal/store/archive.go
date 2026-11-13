@@ -139,8 +139,8 @@ func (tx *Tx) installArchive(arch archive) error {
 		if _, ok := byName[string(name)]; ok {
 			continue
 		}
-		// Archives written before revocations existed have none.
-		if string(name) == string(bucketRevocations) || string(name) == string(bucketRevokeQueue) {
+		// Archives written before revocations or the budget ledger existed have none.
+		if string(name) == string(bucketRevocations) || string(name) == string(bucketRevokeQueue) || string(name) == string(bucketBudget) {
 			byName[string(name)] = archiveBucket{Name: string(name)}
 			continue
 		}

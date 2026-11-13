@@ -281,3 +281,41 @@ func (m ClusterMeta) Validate() error {
 	}
 	return nil
 }
+
+// BudgetReservation is one durable growth-ledger entry (RFC-0001 F01). It is
+// keyed by operation ID and survives controller restart so spent capacity and
+// released-operation tombstones are never reset.
+type BudgetReservation struct {
+	OperationID   string `json:"operation_id"`
+	DeploymentUID string `json:"deployment_uid"`
+	MemoryMiB     int    `json:"memory_mib"`
+	State         string `json:"state"`
+}
+
+func (r *BudgetReservation) UnmarshalJSON(b []byte) error {
+	type alias BudgetReservation
+	var raw alias
+	if err := decodeStrict(b, &raw); err != nil {
+		return err
+	}
+	*r = BudgetReservation(raw)
+	return nil
+}
+
+func (r BudgetReservation) Validate() error {
+	if err := checkID("operation_id", r.OperationID); err != nil {
+		return err
+	}
+	if err := checkID("deployment_uid", r.DeploymentUID); err != nil {
+		return err
+	}
+	if r.MemoryMiB < 32 {
+		return errors.New("budget reservation: memory_mib must be at least 32")
+	}
+	switch r.State {
+	case "reserved", "confirmed", "released":
+	default:
+		return errors.New("budget reservation: state must be reserved, confirmed, or released")
+	}
+	return nil
+}

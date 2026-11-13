@@ -1,6 +1,8 @@
 // Package budget is the version-one capacity ledger for RFC-0001 F01.
 // Reservations are keyed by operation ID so a timed-out create cannot free
-// capacity that may still be running in the provider.
+// capacity that may still be running in the provider. With Persist set, each
+// transition is durably recorded before it is admitted, and Seed reloads spent
+// capacity at startup so a restart never resets the grant usage.
 package budget
 
 import (
@@ -45,18 +47,23 @@ func (g Grant) Valid(now time.Time) error {
 	return nil
 }
 
+// Reservation is one operation's ledger entry.
+type Reservation struct {
+	MemoryMiB int
+	State     string // reserved | confirmed | released
+}
+
 // Ledger tracks in-flight and confirmed host capacity against a Grant.
 type Ledger struct {
 	Grant Grant
 	Now   func() time.Time
+	// Persist, when set, durably records each reservation transition before it
+	// is admitted in memory (RFC-0001 F03: a failed durable write prevents the
+	// dependent effect). A persist error rolls the transition back.
+	Persist func(operationID string, r Reservation) error
 
 	mu   sync.Mutex
-	byOp map[string]reservation
-}
-
-type reservation struct {
-	MemoryMiB int
-	State     string // reserved | confirmed | released
+	byOp map[string]Reservation
 }
 
 func (l *Ledger) now() time.Time {
@@ -68,7 +75,27 @@ func (l *Ledger) now() time.Time {
 
 func (l *Ledger) ensure() {
 	if l.byOp == nil {
-		l.byOp = map[string]reservation{}
+		l.byOp = map[string]Reservation{}
+	}
+}
+
+func (l *Ledger) persist(operationID string, r Reservation) error {
+	if l.Persist == nil {
+		return nil
+	}
+	return l.Persist(operationID, r)
+}
+
+// Seed loads durable reservations at startup without re-persisting them.
+func (l *Ledger) Seed(entries map[string]Reservation) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ensure()
+	for op, r := range entries {
+		l.byOp[op] = r
 	}
 }
 
@@ -107,7 +134,11 @@ func (l *Ledger) ReserveCreate(operationID string, memoryMiB int) error {
 	if mem+memoryMiB > l.Grant.MaxMemoryMiB {
 		return fmt.Errorf("%w: memory cap %d", ErrDenied, l.Grant.MaxMemoryMiB)
 	}
-	l.byOp[operationID] = reservation{MemoryMiB: memoryMiB, State: "reserved"}
+	r := Reservation{MemoryMiB: memoryMiB, State: "reserved"}
+	if err := l.persist(operationID, r); err != nil {
+		return err
+	}
+	l.byOp[operationID] = r
 	return nil
 }
 
@@ -145,6 +176,9 @@ func (l *Ledger) set(operationID, state string) error {
 		return nil
 	}
 	r.State = state
+	if err := l.persist(operationID, r); err != nil {
+		return err
+	}
 	l.byOp[operationID] = r
 	return nil
 }
