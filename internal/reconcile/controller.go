@@ -47,6 +47,9 @@ type Options struct {
 	// Revoker removes revoked installations' object-store identities
 	// (replicacred.Service). Without it, revocations stay pending.
 	Revoker Revoker
+	// OnReconcile, when set, observes each reconcile pass outcome (RFC-0001 §9).
+	// It must not block; it is observation only.
+	OnReconcile func(error)
 }
 
 // Revoker removes an installation's object-store identity. Removing one
@@ -72,6 +75,8 @@ type Controller struct {
 	log     *slog.Logger
 	last    time.Time
 	revoker Revoker
+	// onReconcile observes each pass outcome for metrics.
+	onReconcile func(error)
 	// revokeCursor is the last installation revokeOnce tried. Only the
 	// revocation loop touches it.
 	revokeCursor string
@@ -95,7 +100,7 @@ func New(db DB, exec executor.Executor, dem *demand.Manager, opt Options) *Contr
 	return &Controller{
 		db: db, exec: exec, demand: dem,
 		tick: opt.Tick, backoff: opt.Backoff, now: opt.Now, log: opt.Logger,
-		revoker: opt.Revoker,
+		revoker: opt.Revoker, onReconcile: opt.OnReconcile,
 	}
 }
 
@@ -125,6 +130,14 @@ func (c *Controller) Run(ctx context.Context) error {
 // ReconcileOnce performs one pass. Operation intent is committed before any
 // executor call in that pass.
 func (c *Controller) ReconcileOnce(ctx context.Context) error {
+	err := c.reconcileOnce(ctx)
+	if c.onReconcile != nil {
+		c.onReconcile(err)
+	}
+	return err
+}
+
+func (c *Controller) reconcileOnce(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

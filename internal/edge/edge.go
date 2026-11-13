@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sufuree/sufuree/internal/metrics"
 )
 
 // Activator admits one named service. release must be called when the
@@ -33,6 +35,9 @@ type Server struct {
 	MaxBodyBytes  int64
 	RetryAfter    time.Duration
 	Client        *http.Client
+	// Metrics, when set, observes request counts by status and in-flight
+	// admission (RFC-0001 §9). It is observation only.
+	Metrics *metrics.Registry
 
 	mu   sync.Mutex
 	open int
@@ -45,6 +50,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok\n")
 		return
+	}
+	if s.Metrics != nil {
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		w = sw
+		defer func() { s.Metrics.Counter("edge_requests_total", strconv.Itoa(sw.status)).Inc() }()
 	}
 	if s.MaxConcurrent > 0 && !s.admit() {
 		http.Error(w, "too many requests\n", http.StatusTooManyRequests)
@@ -113,13 +123,41 @@ func (s *Server) admit() bool {
 		return false
 	}
 	s.open++
+	if s.Metrics != nil {
+		s.Metrics.Gauge("edge_active").Set(float64(s.open))
+	}
 	return true
 }
 
 func (s *Server) release() {
 	s.mu.Lock()
 	s.open--
+	open := s.open
 	s.mu.Unlock()
+	if s.Metrics != nil {
+		s.Metrics.Gauge("edge_active").Set(float64(open))
+	}
+}
+
+// statusWriter records the response status for metrics. The edge forward path
+// uses only WriteHeader/Write, so no Flusher/Hijacker passthrough is needed.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wrote {
+		w.status = code
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
 }
 
 func (s *Server) retryAfter() time.Duration {
