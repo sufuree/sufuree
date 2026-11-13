@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -69,6 +70,9 @@ func runController(args []string) error {
 	raftBootstrap := fs.Bool("raft-bootstrap", false, "create the initial one-voter raft configuration; refuse if raft state already exists")
 	edgeListen := fs.String("edge-listen", "", "optional public HTTP edge listen address")
 	edgeMax := fs.Int("edge-max-concurrent", 256, "edge concurrent request cap; 0 disables the cap")
+	metricsListen := fs.String("metrics-listen", "", "optional read-only Prometheus metrics listen address")
+	edgeTLSCert := fs.String("edge-tls-cert", "", "edge TLS server certificate")
+	edgeTLSKey := fs.String("edge-tls-key", "", "edge TLS server key")
 	var edgeUpstreams kvFlags
 	fs.Var(&edgeUpstreams, "edge-upstream", "lease-holding host gateway name=host:port (repeatable); not a raw guest address — use HostWake/HostLeases for direct guests")
 	bootFloor := fs.Bool("boot-floor", false, "serve per-installation boot generations and rollback floors to hosts")
@@ -98,6 +102,10 @@ func runController(args []string) error {
 	if authOn && (*tlsCert == "" || *tlsKey == "" || *tlsClientCA == "") {
 		return errors.New("--tls-cert, --tls-key and --tls-client-ca must be set together")
 	}
+	edgeTLSOn := *edgeTLSCert != "" || *edgeTLSKey != ""
+	if edgeTLSOn && (*edgeTLSCert == "" || *edgeTLSKey == "") {
+		return errors.New("--edge-tls-cert and --edge-tls-key must be set together")
+	}
 	if raftOn && (*raftBind == "" || *raftID == "") {
 		return errors.New("--raft-bind and --raft-id are required to enable raft")
 	}
@@ -122,6 +130,7 @@ func runController(args []string) error {
 		return errors.New("--executor ec2 requires --tls-cert, --tls-key and --tls-client-ca")
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	reg := newMetricsRegistry()
 	effects, err := buildExecutor(*execName, executorOpts{
 		deployment:       *deployment,
 		grantMaxHosts:    *grantMaxHosts,
@@ -167,22 +176,25 @@ func runController(args []string) error {
 		_, raftStat := os.Stat(raftDir)
 		raftExisted := raftStat == nil
 		var err error
-		var peerTLS *raftnode.PeerTLS
+		var peerTLS *tls.Config
 		if authOn {
-			srvTLS, cliTLS, terr := controlauth.PeerTLS(*tlsCert, *tlsKey, *tlsClientCA)
-			if terr != nil {
-				return terr
+			peerTLS, err = controlauth.RaftTransportTLS(*tlsCert, *tlsKey, *tlsClientCA)
+			if err != nil {
+				return err
 			}
-			peerTLS = &raftnode.PeerTLS{Server: srvTLS, Client: cliTLS}
 		} else {
-			log.Warn("raft peers without TLS: development only, not for PHI")
+			log.Warn("raft peers without operator TLS: ephemeral dev certificate, not for PHI")
 		}
+		storeHook, applyHook := raftMetricsHooks(reg)
 		node, err = raftnode.Open(raftnode.Config{
 			DataDir:   raftDir,
 			NodeID:    *raftID,
 			BindAddr:  *raftBind,
 			Bootstrap: *raftBootstrap,
+			ClusterID: raftnode.DeriveClusterID(*deployment),
 			TLS:       peerTLS,
+			OnStore:   storeHook,
+			OnApply:   applyHook,
 		}, controlraft.StoreFSM(st))
 		if err != nil {
 			_ = st.Close()
@@ -205,9 +217,18 @@ func runController(args []string) error {
 	if err := ensureDeployment(journal, *deployment); err != nil {
 		return err
 	}
+	if err := durableLedger(effects, journal, *deployment); err != nil {
+		return err
+	}
 	dem := demand.New(demand.Bolt{Store: journal})
 	c := reconcile.New(journal, effects, dem, reconcile.Options{
 		Tick: tick, Backoff: 15 * time.Second, Logger: log, Revoker: revoker,
+		OnReconcile: func(err error) {
+			reg.Counter("reconcile_runs_total").Inc()
+			if err != nil {
+				reg.Counter("reconcile_errors_total").Inc()
+			}
+		},
 	})
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -239,10 +260,33 @@ func runController(args []string) error {
 				Controller: c, Demand: dem, Upstreams: edgeUpstreams.Map(),
 			},
 			MaxConcurrent: *edgeMax,
+			Metrics:       reg,
 		}}
+	}
+	var ledger *budget.Ledger
+	if g, ok := effects.(*executor.Gated); ok {
+		ledger = g.Ledger
+	}
+	var metricsSrv *http.Server
+	var metricsLn net.Listener
+	if *metricsListen != "" {
+		metricsLn, err = net.Listen("tcp", *metricsListen)
+		if err != nil {
+			return err
+		}
+		metricsSrv = &http.Server{Handler: reg.Handler()}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go pollMetrics(ctx, reg, node, ledger)
+	if metricsSrv != nil {
+		go func() {
+			log.Info("metrics", "addr", metricsLn.Addr().String())
+			if err := metricsSrv.Serve(metricsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics serve", "err", err)
+			}
+		}()
+	}
 	errc := make(chan error, 3)
 	if node != nil {
 		go func() { errc <- reconcileWhenLeader(ctx, node, c, tick, log) }()
@@ -264,8 +308,13 @@ func runController(args []string) error {
 	}()
 	if edgeSrv != nil {
 		go func() {
-			log.Info("edge", "addr", edgeLn.Addr().String())
-			err := edgeSrv.Serve(edgeLn)
+			log.Info("edge", "addr", edgeLn.Addr().String(), "tls", edgeTLSOn)
+			var err error
+			if edgeTLSOn {
+				err = edgeSrv.ServeTLS(edgeLn, *edgeTLSCert, *edgeTLSKey)
+			} else {
+				err = edgeSrv.Serve(edgeLn)
+			}
 			if errors.Is(err, http.ErrServerClosed) {
 				err = nil
 			}
@@ -279,6 +328,9 @@ func runController(args []string) error {
 		_ = srv.Shutdown(shut)
 		if edgeSrv != nil {
 			_ = edgeSrv.Shutdown(shut)
+		}
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shut)
 		}
 		n := 2
 		if edgeSrv != nil {
@@ -298,6 +350,9 @@ func runController(args []string) error {
 		_ = srv.Shutdown(shut)
 		if edgeSrv != nil {
 			_ = edgeSrv.Shutdown(shut)
+		}
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shut)
 		}
 		return err
 	}
@@ -541,4 +596,42 @@ func gateExecutor(inner executor.Executor, opt executorOpts) (executor.Executor,
 		return nil, err
 	}
 	return &executor.Gated{Inner: inner, Ledger: &budget.Ledger{Grant: g}}, nil
+}
+
+// durableLedger backs a gated executor's growth ledger with the control store so
+// a restart re-seeds spent capacity (RFC-0001 F01). Without it, restarting a
+// live executor would reset grant usage and risk over-spend. Reservations flow
+// through the journal (Raft-aware) and are re-seeded for this deployment.
+func durableLedger(effects executor.Executor, j *controlraft.Journal, deployment string) error {
+	g, ok := effects.(*executor.Gated)
+	if !ok || g.Ledger == nil {
+		return nil
+	}
+	g.Ledger.Persist = func(op string, r budget.Reservation) error {
+		return j.Update(func(tx *store.Tx) error {
+			return tx.PutBudgetReservation(resource.BudgetReservation{
+				OperationID:   op,
+				DeploymentUID: deployment,
+				MemoryMiB:     r.MemoryMiB,
+				State:         r.State,
+			})
+		})
+	}
+	seed := map[string]budget.Reservation{}
+	if err := j.View(func(tx *store.Tx) error {
+		rs, err := tx.ListBudgetReservations()
+		if err != nil {
+			return err
+		}
+		for _, r := range rs {
+			if r.DeploymentUID == deployment {
+				seed[r.OperationID] = budget.Reservation{MemoryMiB: r.MemoryMiB, State: r.State}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	g.Ledger.Seed(seed)
+	return nil
 }

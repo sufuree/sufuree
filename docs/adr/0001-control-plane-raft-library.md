@@ -1,6 +1,6 @@
 # ADR-0001: Control-plane Raft library choice
 
-**Status:** Accepted  
+**Status:** Superseded by [ADR-0002](0002-control-plane-sufuree-raft.md) (2026-11-12)  
 **Date:** 2026-11-09  
 **Context:** Sufuree RFC-0001 controller (`feat/rfc0001-code-complete`); sibling design repo [sufuree/raft](https://github.com/sufuree/raft) RFC-0001 (deterministic Go Raft library, design stage only).
 

@@ -233,3 +233,52 @@ func PeerTLS(certFile, keyFile, caFile string) (server, client *tls.Config, err 
 	}
 	return server, client, nil
 }
+
+// RaftTransportTLS builds the single mutual-TLS config the
+// github.com/sufuree/raft peer transport requires: a certificate plus ClientCAs
+// and RootCAs from the controller CA, and a VerifyConnection that binds every
+// peer to the controller role. Hostname verification is replaced by CA + role
+// checking (controlauth certificates are identity-bound, not host-bound),
+// matching PeerTLS semantics. The transport enforces TLS 1.3 and its own ALPN.
+func RaftTransportTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
+	cert, err := loadKeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := certPool(caFile)
+	if err != nil {
+		return nil, err
+	}
+	verify := func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("controlauth: raft peer sent no certificate")
+		}
+		inter := x509.NewCertPool()
+		for _, c := range cs.PeerCertificates[1:] {
+			inter.AddCert(c)
+		}
+		if _, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+			Roots:         pool,
+			Intermediates: inter,
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		}); err != nil {
+			return fmt.Errorf("controlauth: raft peer: %w", err)
+		}
+		p, err := FromCert(cs.PeerCertificates[0])
+		if err != nil {
+			return err
+		}
+		if p.Role != RoleController {
+			return fmt.Errorf("controlauth: raft peer %s is not a controller", p)
+		}
+		return nil
+	}
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		Certificates:       []tls.Certificate{cert},
+		ClientCAs:          pool,
+		RootCAs:            pool,
+		InsecureSkipVerify: true, // replaced by VerifyConnection: CA and role, not host name
+		VerifyConnection:   verify,
+	}, nil
+}
